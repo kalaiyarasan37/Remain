@@ -23,7 +23,8 @@
 @rem
 @rem ##########################################################################
 
-@rem Set local scope for the variables with windows NT shell
+@rem Set local scope for the variables with windows NT shell 
+set GRADLE_USER_HOME=C:\GradleHome
 if "%OS%"=="Windows_NT" setlocal
 
 set DIRNAME=%~dp0
@@ -92,3 +93,5 @@ exit /b %EXIT_CODE%
 if "%OS%"=="Windows_NT" endlocal
 
 :omega
+
+

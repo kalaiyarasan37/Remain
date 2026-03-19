@@ -99,3 +99,8 @@ android/app/.cxx/
 
 # Windows specific
 Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.production
