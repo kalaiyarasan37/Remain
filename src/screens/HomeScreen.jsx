@@ -12,8 +12,11 @@ import {
 import Colors from '../constants/Colors';
 import ReminderService from '../services/ReminderService';
 import Storage from '../utils/Storage';
+import PicovoiceService from '../services/PicovoiceService';
+import VoiceAssistantModal from '../components/VoiceAssistantModal';
 
 const HomeScreen = ({ navigation }) => {
+   const [showVoiceAssistant, setShowVoiceAssistant] = useState(false);
    const [upcomingReminders, setUpcomingReminders] = useState([]);
    const [user, setUser] = useState(null);
    const [greeting, setGreeting] = useState('');
@@ -23,7 +26,16 @@ const HomeScreen = ({ navigation }) => {
       loadData();
       setGreetingMessage();
       const unsubscribe = navigation.addListener('focus', loadData);
-      return unsubscribe;
+
+      // Start wake word detection
+      PicovoiceService.init(() => {
+         setShowVoiceAssistant(true);
+      });
+
+      return () => {
+         unsubscribe();
+         PicovoiceService.stop();
+      };
    }, [navigation]);
 
    const loadData = async () => {
@@ -218,10 +230,6 @@ const HomeScreen = ({ navigation }) => {
                                  <View style={[styles.badge, styles.badgeDone]}>
                                     <Text style={styles.badgeDoneText}>✓ Completed</Text>
                                  </View>
-                              ) : new Date(selectedReminder.dateTime) < new Date() ? (
-                                 <View style={[styles.badge, styles.badgeOverdue]}>
-                                    <Text style={styles.badgeOverdueText}>⚠ Overdue</Text>
-                                 </View>
                               ) : (
                                  <View style={[styles.badge, styles.badgePending]}>
                                     <Text style={styles.badgePendingText}>🔔 Upcoming</Text>
@@ -316,6 +324,22 @@ const HomeScreen = ({ navigation }) => {
             style={styles.fab}
             onPress={() => navigation.navigate('AddReminder', { isVoice: false })}>
             <Text style={styles.fabText}>+</Text>
+         </TouchableOpacity>
+         <VoiceAssistantModal
+            visible={showVoiceAssistant}
+            onClose={() => setShowVoiceAssistant(false)}
+            onAddReminder={(intent) => {
+               navigation.navigate('AddReminder', {
+                  isVoice: true,
+                  prefillData: intent,
+               });
+            }}
+         />
+         {/* Voice Assistant FAB */}
+         <TouchableOpacity
+            style={styles.voiceFab}
+            onPress={() => setShowVoiceAssistant(true)}>
+            <Text style={styles.voiceFabText}>🎤</Text>
          </TouchableOpacity>
       </View>
    );
@@ -530,14 +554,6 @@ const styles = StyleSheet.create({
       fontWeight: '600',
       fontSize: 13,
    },
-   badgeOverdue: {
-      backgroundColor: Colors.error + '20',
-   },
-   badgeOverdueText: {
-      color: Colors.error,
-      fontWeight: '600',
-      fontSize: 13,
-   },
    badgePending: {
       backgroundColor: Colors.primary + '20',
    },
@@ -642,6 +658,25 @@ const styles = StyleSheet.create({
       paddingHorizontal: 12,
       paddingVertical: 6,
       borderRadius: 20,
+   },
+   voiceFab: {
+      position: 'absolute',
+      bottom: 90,
+      right: 24,
+      width: 56,
+      height: 56,
+      borderRadius: 28,
+      backgroundColor: Colors.secondary,
+      alignItems: 'center',
+      justifyContent: 'center',
+      elevation: 6,
+      shadowColor: Colors.secondary,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.4,
+      shadowRadius: 8,
+   },
+   voiceFabText: {
+      fontSize: 24,
    },
 });
 

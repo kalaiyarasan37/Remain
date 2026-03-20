@@ -20,6 +20,19 @@ const audioRecorderPlayer = new AudioRecorderPlayer();
 
 const AddReminderScreen = ({ navigation, route }) => {
    const isVoice = route.params?.isVoice || false;
+   const prefillData = route.params?.prefillData || null;
+
+   useEffect(() => {
+      if (prefillData) {
+         if (prefillData.message) setMessage(prefillData.message);
+         if (prefillData.location) setLocation(prefillData.location);
+         if (prefillData.date && prefillData.time) {
+            const [year, month, day] = prefillData.date.split('-').map(Number);
+            const [hour, minute] = prefillData.time.split(':').map(Number);
+            setSelectedDate(new Date(year, month - 1, day, hour, minute));
+         }
+      }
+   }, []);
 
    const [message, setMessage] = useState('');
    const [location, setLocation] = useState('');
@@ -150,7 +163,7 @@ const AddReminderScreen = ({ navigation, route }) => {
          const newDate = new Date(year, month - 1, day, hour, minute);
          setSelectedDate(newDate);
 
-      }  catch (e) {
+      } catch (e) {
          console.error('Voice error:', e);
          stopPulse();
          setIsRecording(false);
@@ -167,323 +180,323 @@ const AddReminderScreen = ({ navigation, route }) => {
             'Could not process your voice. Please try again or fill manually.',
          );
       }
-};
+   };
 
-const getMicIcon = () => {
-   if (isRecording) return '⏹';
-   if (isTranscribing || isParsing) return '⏳';
-   return '🎤';
-};
+   const getMicIcon = () => {
+      if (isRecording) return '⏹';
+      if (isTranscribing || isParsing) return '⏳';
+      return '🎤';
+   };
 
-const getMicColor = () => {
-   if (isRecording) return Colors.error;
-   if (isTranscribing || isParsing) return Colors.warning;
-   return Colors.primary;
-};
+   const getMicColor = () => {
+      if (isRecording) return Colors.error;
+      if (isTranscribing || isParsing) return Colors.warning;
+      return Colors.primary;
+   };
 
-const validateInputs = () => {
-   if (!message.trim()) {
-      Alert.alert('Missing Message', 'Please enter a reminder message.');
-      return false;
-   }
-   return true;
-};
+   const validateInputs = () => {
+      if (!message.trim()) {
+         Alert.alert('Missing Message', 'Please enter a reminder message.');
+         return false;
+      }
+      return true;
+   };
 
-const handleSave = async () => {
-   if (!validateInputs()) return;
-   setLoading(true);
-   try {
-      await ReminderService.add({
-         title: message.trim(),
-         description: '',
-         location: location.trim(),
-         dateTime: selectedDate.toISOString(),
-         isVoice,
-      });
-      setLoading(false);
-      Alert.alert('Success', 'Reminder saved successfully!', [
-         { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
-   } catch (e) {
-      setLoading(false);
-      Alert.alert('Error', 'Failed to save reminder. Please try again.');
-   }
-};
+   const handleSave = async () => {
+      if (!validateInputs()) return;
+      setLoading(true);
+      try {
+         await ReminderService.add({
+            title: message.trim(),
+            description: '',
+            location: location.trim(),
+            dateTime: selectedDate.toISOString(),
+            isVoice,
+         });
+         setLoading(false);
+         Alert.alert('Success', 'Reminder saved successfully!', [
+            { text: 'OK', onPress: () => navigation.goBack() },
+         ]);
+      } catch (e) {
+         setLoading(false);
+         Alert.alert('Error', 'Failed to save reminder. Please try again.');
+      }
+   };
 
-return (
-   <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={Colors.primary} />
+   return (
+      <View style={styles.container}>
+         <StatusBar barStyle="light-content" backgroundColor={Colors.primary} />
 
-      {/* Header */}
-      <View style={styles.header}>
-         <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Text style={styles.backBtn}>← Back</Text>
-         </TouchableOpacity>
-         <Text style={styles.headerTitle}>✏️ Add Reminder</Text>
-         <View style={{ width: 60 }} />
-      </View>
+         {/* Header */}
+         <View style={styles.header}>
+            <TouchableOpacity onPress={() => navigation.goBack()}>
+               <Text style={styles.backBtn}>← Back</Text>
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>✏️ Add Reminder</Text>
+            <View style={{ width: 60 }} />
+         </View>
 
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+         <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
 
-         {/* Status Banner */}
-         {statusText ? (
-            <View style={[
-               styles.statusBanner,
-               isRecording && styles.statusBannerRecording,
-               (isTranscribing || isParsing) && styles.statusBannerProcessing,
-            ]}>
-               {(isTranscribing || isParsing) && (
-                  <ActivityIndicator
-                     size="small"
-                     color={Colors.primary}
-                     style={{ marginRight: 8 }}
-                  />
-               )}
-               <Text style={[
-                  styles.statusText,
-                  isRecording && styles.statusTextRecording,
+            {/* Status Banner */}
+            {statusText ? (
+               <View style={[
+                  styles.statusBanner,
+                  isRecording && styles.statusBannerRecording,
+                  (isTranscribing || isParsing) && styles.statusBannerProcessing,
                ]}>
-                  {statusText}
-               </Text>
-            </View>
-         ) : null}
-
-         {/* Message */}
-         <View style={styles.inputGroup}>
-            <Text style={styles.label}>Message *</Text>
-            <TextInput
-               style={[styles.input, styles.textArea]}
-               placeholder="What do you want to be reminded about? Or use 🎤 mic"
-               value={message}
-               onChangeText={setMessage}
-               multiline
-               numberOfLines={4}
-               placeholderTextColor={Colors.textLight}
-            />
-         </View>
-
-         {/* Location */}
-         <View style={styles.inputGroup}>
-            <Text style={styles.label}>Location (Optional)</Text>
-            <TextInput
-               style={styles.input}
-               placeholder="Where? e.g. Office, Home..."
-               value={location}
-               onChangeText={setLocation}
-               placeholderTextColor={Colors.textLight}
-            />
-         </View>
-
-         {/* Date Picker */}
-         <View style={styles.inputGroup}>
-            <Text style={styles.label}>Date *</Text>
-            <TouchableOpacity
-               style={styles.pickerBtn}
-               onPress={() => {
-                  setTempDay(String(selectedDate.getDate()));
-                  setTempMonth(String(selectedDate.getMonth() + 1));
-                  setTempYear(String(selectedDate.getFullYear()));
-                  setShowDateModal(true);
-               }}>
-               <Text style={styles.pickerText}>
-                  {'📅  ' +
-                     selectedDate.toLocaleDateString('en-IN', {
-                        weekday: 'short',
-                        day: '2-digit',
-                        month: 'short',
-                        year: 'numeric',
-                     })}
-               </Text>
-            </TouchableOpacity>
-         </View>
-
-         {/* Time Picker */}
-         <View style={styles.inputGroup}>
-            <Text style={styles.label}>Time *</Text>
-            <TouchableOpacity
-               style={styles.pickerBtn}
-               onPress={() => {
-                  const h = selectedDate.getHours();
-                  setTempHour(String(h % 12 || 12));
-                  setTempMinute(String(selectedDate.getMinutes()));
-                  setTempAmPm(h >= 12 ? 'PM' : 'AM');
-                  setShowTimeModal(true);
-               }}>
-               <Text style={styles.pickerText}>
-                  {'🕐  ' +
-                     selectedDate.toLocaleTimeString('en-US', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: true,
-                     })}
-               </Text>
-            </TouchableOpacity>
-         </View>
-
-         {/* Save Button */}
-         <TouchableOpacity
-            style={[styles.saveBtn, loading && styles.saveBtnDisabled]}
-            onPress={handleSave}
-            disabled={loading}>
-            {loading ? (
-               <ActivityIndicator color={Colors.white} />
-            ) : (
-               <Text style={styles.saveBtnText}>Save Reminder 🔔</Text>
-            )}
-         </TouchableOpacity>
-
-         <View style={{ height: 100 }} />
-      </ScrollView>
-
-      {/* Date Modal */}
-      <Modal visible={showDateModal} transparent animationType="slide">
-         <View style={styles.modalOverlay}>
-            <View style={styles.modalBox}>
-               <Text style={styles.modalTitle}>Select Date</Text>
-               <View style={styles.modalRow}>
-                  <View style={styles.modalField}>
-                     <Text style={styles.modalLabel}>Day</Text>
-                     <TextInput
-                        style={styles.modalInput}
-                        keyboardType="number-pad"
-                        maxLength={2}
-                        value={tempDay}
-                        onChangeText={setTempDay}
+                  {(isTranscribing || isParsing) && (
+                     <ActivityIndicator
+                        size="small"
+                        color={Colors.primary}
+                        style={{ marginRight: 8 }}
                      />
-                  </View>
-                  <View style={styles.modalField}>
-                     <Text style={styles.modalLabel}>Month</Text>
-                     <TextInput
-                        style={styles.modalInput}
-                        keyboardType="number-pad"
-                        maxLength={2}
-                        value={tempMonth}
-                        onChangeText={setTempMonth}
-                     />
-                  </View>
-                  <View style={styles.modalField}>
-                     <Text style={styles.modalLabel}>Year</Text>
-                     <TextInput
-                        style={styles.modalInput}
-                        keyboardType="number-pad"
-                        maxLength={4}
-                        value={tempYear}
-                        onChangeText={setTempYear}
-                     />
-                  </View>
+                  )}
+                  <Text style={[
+                     styles.statusText,
+                     isRecording && styles.statusTextRecording,
+                  ]}>
+                     {statusText}
+                  </Text>
                </View>
-               <View style={styles.modalButtons}>
-                  <TouchableOpacity
-                     style={styles.modalCancelBtn}
-                     onPress={() => setShowDateModal(false)}>
-                     <Text style={styles.modalCancelText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                     style={styles.modalConfirmBtn}
-                     onPress={() => {
-                        const d = parseInt(tempDay);
-                        const m = parseInt(tempMonth);
-                        const y = parseInt(tempYear);
-                        if (d < 1 || d > 31 || m < 1 || m > 12 || y < 2024) {
-                           Alert.alert('Invalid Date', 'Please enter a valid date.');
-                           return;
-                        }
-                        const updated = new Date(selectedDate);
-                        updated.setFullYear(y);
-                        updated.setMonth(m - 1);
-                        updated.setDate(d);
-                        setSelectedDate(updated);
-                        setShowDateModal(false);
-                     }}>
-                     <Text style={styles.modalConfirmText}>Confirm</Text>
-                  </TouchableOpacity>
-               </View>
-            </View>
-         </View>
-      </Modal>
+            ) : null}
 
-      {/* Time Modal */}
-      <Modal visible={showTimeModal} transparent animationType="slide">
-         <View style={styles.modalOverlay}>
-            <View style={styles.modalBox}>
-               <Text style={styles.modalTitle}>Select Time</Text>
-               <View style={styles.modalRow}>
-                  <View style={styles.modalField}>
-                     <Text style={styles.modalLabel}>Hour (1-12)</Text>
-                     <TextInput
-                        style={styles.modalInput}
-                        keyboardType="number-pad"
-                        maxLength={2}
-                        value={tempHour}
-                        onChangeText={setTempHour}
-                     />
+            {/* Message */}
+            <View style={styles.inputGroup}>
+               <Text style={styles.label}>Message *</Text>
+               <TextInput
+                  style={[styles.input, styles.textArea]}
+                  placeholder="What do you want to be reminded about? Or use 🎤 mic"
+                  value={message}
+                  onChangeText={setMessage}
+                  multiline
+                  numberOfLines={4}
+                  placeholderTextColor={Colors.textLight}
+               />
+            </View>
+
+            {/* Location */}
+            <View style={styles.inputGroup}>
+               <Text style={styles.label}>Location (Optional)</Text>
+               <TextInput
+                  style={styles.input}
+                  placeholder="Where? e.g. Office, Home..."
+                  value={location}
+                  onChangeText={setLocation}
+                  placeholderTextColor={Colors.textLight}
+               />
+            </View>
+
+            {/* Date Picker */}
+            <View style={styles.inputGroup}>
+               <Text style={styles.label}>Date *</Text>
+               <TouchableOpacity
+                  style={styles.pickerBtn}
+                  onPress={() => {
+                     setTempDay(String(selectedDate.getDate()));
+                     setTempMonth(String(selectedDate.getMonth() + 1));
+                     setTempYear(String(selectedDate.getFullYear()));
+                     setShowDateModal(true);
+                  }}>
+                  <Text style={styles.pickerText}>
+                     {'📅  ' +
+                        selectedDate.toLocaleDateString('en-IN', {
+                           weekday: 'short',
+                           day: '2-digit',
+                           month: 'short',
+                           year: 'numeric',
+                        })}
+                  </Text>
+               </TouchableOpacity>
+            </View>
+
+            {/* Time Picker */}
+            <View style={styles.inputGroup}>
+               <Text style={styles.label}>Time *</Text>
+               <TouchableOpacity
+                  style={styles.pickerBtn}
+                  onPress={() => {
+                     const h = selectedDate.getHours();
+                     setTempHour(String(h % 12 || 12));
+                     setTempMinute(String(selectedDate.getMinutes()));
+                     setTempAmPm(h >= 12 ? 'PM' : 'AM');
+                     setShowTimeModal(true);
+                  }}>
+                  <Text style={styles.pickerText}>
+                     {'🕐  ' +
+                        selectedDate.toLocaleTimeString('en-US', {
+                           hour: '2-digit',
+                           minute: '2-digit',
+                           hour12: true,
+                        })}
+                  </Text>
+               </TouchableOpacity>
+            </View>
+
+            {/* Save Button */}
+            <TouchableOpacity
+               style={[styles.saveBtn, loading && styles.saveBtnDisabled]}
+               onPress={handleSave}
+               disabled={loading}>
+               {loading ? (
+                  <ActivityIndicator color={Colors.white} />
+               ) : (
+                  <Text style={styles.saveBtnText}>Save Reminder 🔔</Text>
+               )}
+            </TouchableOpacity>
+
+            <View style={{ height: 100 }} />
+         </ScrollView>
+
+         {/* Date Modal */}
+         <Modal visible={showDateModal} transparent animationType="slide">
+            <View style={styles.modalOverlay}>
+               <View style={styles.modalBox}>
+                  <Text style={styles.modalTitle}>Select Date</Text>
+                  <View style={styles.modalRow}>
+                     <View style={styles.modalField}>
+                        <Text style={styles.modalLabel}>Day</Text>
+                        <TextInput
+                           style={styles.modalInput}
+                           keyboardType="number-pad"
+                           maxLength={2}
+                           value={tempDay}
+                           onChangeText={setTempDay}
+                        />
+                     </View>
+                     <View style={styles.modalField}>
+                        <Text style={styles.modalLabel}>Month</Text>
+                        <TextInput
+                           style={styles.modalInput}
+                           keyboardType="number-pad"
+                           maxLength={2}
+                           value={tempMonth}
+                           onChangeText={setTempMonth}
+                        />
+                     </View>
+                     <View style={styles.modalField}>
+                        <Text style={styles.modalLabel}>Year</Text>
+                        <TextInput
+                           style={styles.modalInput}
+                           keyboardType="number-pad"
+                           maxLength={4}
+                           value={tempYear}
+                           onChangeText={setTempYear}
+                        />
+                     </View>
                   </View>
-                  <View style={styles.modalField}>
-                     <Text style={styles.modalLabel}>Minute</Text>
-                     <TextInput
-                        style={styles.modalInput}
-                        keyboardType="number-pad"
-                        maxLength={2}
-                        value={tempMinute}
-                        onChangeText={setTempMinute}
-                     />
-                  </View>
-                  <View style={styles.modalField}>
-                     <Text style={styles.modalLabel}>AM/PM</Text>
+                  <View style={styles.modalButtons}>
                      <TouchableOpacity
-                        style={[styles.modalInput, styles.ampmBtn]}
-                        onPress={() =>
-                           setTempAmPm(prev => (prev === 'AM' ? 'PM' : 'AM'))
-                        }>
-                        <Text style={styles.ampmText}>{tempAmPm}</Text>
+                        style={styles.modalCancelBtn}
+                        onPress={() => setShowDateModal(false)}>
+                        <Text style={styles.modalCancelText}>Cancel</Text>
+                     </TouchableOpacity>
+                     <TouchableOpacity
+                        style={styles.modalConfirmBtn}
+                        onPress={() => {
+                           const d = parseInt(tempDay);
+                           const m = parseInt(tempMonth);
+                           const y = parseInt(tempYear);
+                           if (d < 1 || d > 31 || m < 1 || m > 12 || y < 2024) {
+                              Alert.alert('Invalid Date', 'Please enter a valid date.');
+                              return;
+                           }
+                           const updated = new Date(selectedDate);
+                           updated.setFullYear(y);
+                           updated.setMonth(m - 1);
+                           updated.setDate(d);
+                           setSelectedDate(updated);
+                           setShowDateModal(false);
+                        }}>
+                        <Text style={styles.modalConfirmText}>Confirm</Text>
                      </TouchableOpacity>
                   </View>
                </View>
-               <View style={styles.modalButtons}>
-                  <TouchableOpacity
-                     style={styles.modalCancelBtn}
-                     onPress={() => setShowTimeModal(false)}>
-                     <Text style={styles.modalCancelText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                     style={styles.modalConfirmBtn}
-                     onPress={() => {
-                        let h = parseInt(tempHour);
-                        const min = parseInt(tempMinute);
-                        if (h < 1 || h > 12 || min < 0 || min > 59) {
-                           Alert.alert('Invalid Time', 'Please enter a valid time.');
-                           return;
-                        }
-                        if (tempAmPm === 'AM' && h === 12) h = 0;
-                        if (tempAmPm === 'PM' && h !== 12) h += 12;
-                        const updated = new Date(selectedDate);
-                        updated.setHours(h);
-                        updated.setMinutes(min);
-                        setSelectedDate(updated);
-                        setShowTimeModal(false);
-                     }}>
-                     <Text style={styles.modalConfirmText}>Confirm</Text>
-                  </TouchableOpacity>
+            </View>
+         </Modal>
+
+         {/* Time Modal */}
+         <Modal visible={showTimeModal} transparent animationType="slide">
+            <View style={styles.modalOverlay}>
+               <View style={styles.modalBox}>
+                  <Text style={styles.modalTitle}>Select Time</Text>
+                  <View style={styles.modalRow}>
+                     <View style={styles.modalField}>
+                        <Text style={styles.modalLabel}>Hour (1-12)</Text>
+                        <TextInput
+                           style={styles.modalInput}
+                           keyboardType="number-pad"
+                           maxLength={2}
+                           value={tempHour}
+                           onChangeText={setTempHour}
+                        />
+                     </View>
+                     <View style={styles.modalField}>
+                        <Text style={styles.modalLabel}>Minute</Text>
+                        <TextInput
+                           style={styles.modalInput}
+                           keyboardType="number-pad"
+                           maxLength={2}
+                           value={tempMinute}
+                           onChangeText={setTempMinute}
+                        />
+                     </View>
+                     <View style={styles.modalField}>
+                        <Text style={styles.modalLabel}>AM/PM</Text>
+                        <TouchableOpacity
+                           style={[styles.modalInput, styles.ampmBtn]}
+                           onPress={() =>
+                              setTempAmPm(prev => (prev === 'AM' ? 'PM' : 'AM'))
+                           }>
+                           <Text style={styles.ampmText}>{tempAmPm}</Text>
+                        </TouchableOpacity>
+                     </View>
+                  </View>
+                  <View style={styles.modalButtons}>
+                     <TouchableOpacity
+                        style={styles.modalCancelBtn}
+                        onPress={() => setShowTimeModal(false)}>
+                        <Text style={styles.modalCancelText}>Cancel</Text>
+                     </TouchableOpacity>
+                     <TouchableOpacity
+                        style={styles.modalConfirmBtn}
+                        onPress={() => {
+                           let h = parseInt(tempHour);
+                           const min = parseInt(tempMinute);
+                           if (h < 1 || h > 12 || min < 0 || min > 59) {
+                              Alert.alert('Invalid Time', 'Please enter a valid time.');
+                              return;
+                           }
+                           if (tempAmPm === 'AM' && h === 12) h = 0;
+                           if (tempAmPm === 'PM' && h !== 12) h += 12;
+                           const updated = new Date(selectedDate);
+                           updated.setHours(h);
+                           updated.setMinutes(min);
+                           setSelectedDate(updated);
+                           setShowTimeModal(false);
+                        }}>
+                        <Text style={styles.modalConfirmText}>Confirm</Text>
+                     </TouchableOpacity>
+                  </View>
                </View>
             </View>
-         </View>
-      </Modal>
+         </Modal>
 
-      {/* Mic FAB */}
-      <Animated.View
-         style={[
-            styles.micFabContainer,
-            { transform: [{ scale: pulseAnim }] },
-         ]}>
-         <TouchableOpacity
-            style={[styles.micFab, { backgroundColor: getMicColor() }]}
-            onPress={handleMicPress}
-            disabled={isTranscribing || isParsing}>
-            <Text style={styles.micFabText}>{getMicIcon()}</Text>
-         </TouchableOpacity>
-      </Animated.View>
-   </View>
-);
+         {/* Mic FAB */}
+         <Animated.View
+            style={[
+               styles.micFabContainer,
+               { transform: [{ scale: pulseAnim }] },
+            ]}>
+            <TouchableOpacity
+               style={[styles.micFab, { backgroundColor: getMicColor() }]}
+               onPress={handleMicPress}
+               disabled={isTranscribing || isParsing}>
+               <Text style={styles.micFabText}>{getMicIcon()}</Text>
+            </TouchableOpacity>
+         </Animated.View>
+      </View>
+   );
 };
 
 const styles = StyleSheet.create({
