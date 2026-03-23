@@ -1,4 +1,5 @@
 import Storage from '../utils/Storage';
+import NotificationService from './NotificationService';
 
 const REMINDERS_KEY = 'reminders';
 
@@ -29,6 +30,8 @@ const ReminderService = {
       };
       reminders.push(newReminder);
       await Storage.set(REMINDERS_KEY, reminders);
+      // In the add function, after saving:
+      await NotificationService.scheduleForReminder(newReminder);
       return newReminder;
    },
 
@@ -71,6 +74,14 @@ const ReminderService = {
 
    complete: async (id) => {
       return await ReminderService.update(id, { isCompleted: true });
+   },
+
+   markComplete: async (id) => {
+      return await ReminderService.update(id, { isCompleted: true });
+   },
+
+   softDelete: async (id) => {
+      return await ReminderService.delete(id);
    },
 
    getUpcoming: async () => {

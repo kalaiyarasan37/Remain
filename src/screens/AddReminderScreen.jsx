@@ -21,9 +21,15 @@ const audioRecorderPlayer = new AudioRecorderPlayer();
 const AddReminderScreen = ({ navigation, route }) => {
    const isVoice = route.params?.isVoice || false;
    const prefillData = route.params?.prefillData || null;
+   const editReminder = route.params?.editReminder || null;
+   const isEditMode = !!editReminder;
 
    useEffect(() => {
-      if (prefillData) {
+      if (editReminder) {
+         setMessage(editReminder.title);
+         setLocation(editReminder.location || '');
+         setSelectedDate(new Date(editReminder.dateTime));
+      } else if (prefillData) {
          if (prefillData.message) setMessage(prefillData.message);
          if (prefillData.location) setLocation(prefillData.location);
          if (prefillData.date && prefillData.time) {
@@ -206,13 +212,29 @@ const AddReminderScreen = ({ navigation, route }) => {
       if (!validateInputs()) return;
       setLoading(true);
       try {
-         await ReminderService.add({
-            title: message.trim(),
-            description: '',
-            location: location.trim(),
-            dateTime: selectedDate.toISOString(),
-            isVoice,
-         });
+         if (isEditMode) {
+            await ReminderService.update(editReminder.id, {
+               title: message.trim(),
+               location: location.trim(),
+               dateTime: selectedDate.toISOString(),
+            });
+            // Reschedule notification
+            const updated = await ReminderService.getAll();
+            const updatedReminder = updated.find(r => r.id === editReminder.id);
+            if (updatedReminder) {
+               const NotificationService = require('../services/NotificationService').default;
+               await NotificationService.cancelForReminder(editReminder.id);
+               await NotificationService.scheduleForReminder(updatedReminder);
+            }
+         } else {
+            await ReminderService.add({
+               title: message.trim(),
+               description: '',
+               location: location.trim(),
+               dateTime: selectedDate.toISOString(),
+               isVoice,
+            });
+         }
          setLoading(false);
          Alert.alert('Success', 'Reminder saved successfully!', [
             { text: 'OK', onPress: () => navigation.goBack() },
@@ -232,7 +254,9 @@ const AddReminderScreen = ({ navigation, route }) => {
             <TouchableOpacity onPress={() => navigation.goBack()}>
                <Text style={styles.backBtn}>← Back</Text>
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>✏️ Add Reminder</Text>
+            <Text style={styles.headerTitle}>
+   {isEditMode ? '✏️ Edit Reminder' : '✏️ Add Reminder'}
+</Text>
             <View style={{ width: 60 }} />
          </View>
 
@@ -341,7 +365,9 @@ const AddReminderScreen = ({ navigation, route }) => {
                {loading ? (
                   <ActivityIndicator color={Colors.white} />
                ) : (
-                  <Text style={styles.saveBtnText}>Save Reminder 🔔</Text>
+                  <Text style={styles.saveBtnText}>
+   {isEditMode ? 'Update Reminder ✅' : 'Save Reminder 🔔'}
+</Text>
                )}
             </TouchableOpacity>
 

@@ -30,10 +30,41 @@ const VoiceService = {
       return true;
    },
 
-   startRecording: async () => {
+   startRecording: async (onSilenceDetected) => {
       const path = `${RNFS.CachesDirectoryPath}/reminder_voice.mp4`;
-      await audioRecorderPlayer.startRecorder(path);
-      audioRecorderPlayer.addRecordBackListener(() => { });
+
+      let silenceTimer = null;
+      let hasSpokeOnce = false;
+
+      const audioSet = {
+         AudioEncoderAndroid: 3,
+         AudioSourceAndroid: 1,
+         OutputFormatAndroid: 2,
+      };
+
+      await audioRecorderPlayer.startRecorder(path, audioSet, true); // true = metering enabled
+
+      audioRecorderPlayer.addRecordBackListener((e) => {
+         const db = e.currentMetering ?? -160;
+         console.log('Audio level:', db); // check this in console
+
+         const isSilent = db < -9;
+
+         if (!isSilent) {
+            hasSpokeOnce = true;
+            if (silenceTimer) {
+               clearTimeout(silenceTimer);
+               silenceTimer = null;
+            }
+         } else if (hasSpokeOnce && isSilent && !silenceTimer) {
+            silenceTimer = setTimeout(() => {
+               if (onSilenceDetected) {
+                  onSilenceDetected();
+               }
+            }, 1500);
+         }
+      });
+
       return path;
    },
 

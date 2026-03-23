@@ -9,10 +9,12 @@ import {
    FlatList,
    ActivityIndicator,
    ScrollView,
+   AppState,
 } from 'react-native';
 import Colors from '../constants/Colors';
 import VoiceService from '../services/VoiceService';
 import IntentService from '../services/IntentService';
+import PicovoiceService from '../services/PicovoiceService';
 
 const STATES = {
    LISTENING: 'listening',
@@ -22,22 +24,36 @@ const STATES = {
    ERROR: 'error',
 };
 
-const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
+const VoiceAssistantModal = ({
+   visible,
+   onClose,
+   onAddReminder,
+   triggeredByWakeWord = false,
+}) => {
    const [state, setState] = useState(STATES.LISTENING);
    const [statusText, setStatusText] = useState('Listening...');
    const [transcribedText, setTranscribedText] = useState('');
    const [results, setResults] = useState([]);
    const [summary, setSummary] = useState('');
    const [errorText, setErrorText] = useState('');
+   const [silenceCountdown, setSilenceCountdown] = useState(3);
 
    const pulseAnim = useRef(new Animated.Value(1)).current;
    const pulseLoop = useRef(null);
+   const autoStopTimer = useRef(null);
+   const silenceTimer = useRef(null);
+   const silenceInterval = useRef(null);
+   const isRecording = useRef(false);
 
    useEffect(() => {
       if (visible) {
+         // Pause porcupine while modal is open
+         PicovoiceService.pauseForVoiceInput();
          startListening();
       } else {
          cleanup();
+         // Resume porcupine after modal closes
+         PicovoiceService.resumeAfterVoiceInput();
       }
       return () => cleanup();
    }, [visible]);
@@ -65,18 +81,59 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
       pulseAnim.setValue(1);
    };
 
-   const cleanup = async () => {
-      stopPulse();
+   const clearAllTimers = () => {
+      if (autoStopTimer.current) clearTimeout(autoStopTimer.current);
+      if (silenceTimer.current) clearTimeout(silenceTimer.current);
+      if (silenceInterval.current) clearInterval(silenceInterval.current);
+      autoStopTimer.current = null;
+      silenceTimer.current = null;
+      silenceInterval.current = null;
    };
 
-   const autoStopTimer = useRef(null);
+   const cleanup = async () => {
+      stopPulse();
+      clearAllTimers();
+      isRecording.current = false;
+      try {
+         await VoiceService.stopRecording();
+      } catch (e) { }
+   };
+
+   const startSilenceCountdown = () => {
+      setSilenceCountdown(3);
+      let count = 3;
+
+      silenceInterval.current = setInterval(() => {
+         count -= 1;
+         setSilenceCountdown(count);
+         if (count <= 0) {
+            clearInterval(silenceInterval.current);
+         }
+      }, 1000);
+
+      // Auto stop after 3 seconds silence
+      silenceTimer.current = setTimeout(async () => {
+         if (isRecording.current) {
+            await processVoice();
+         }
+      }, 3000);
+   };
+
+   const silenceCountdownRef = useRef(null);
+
+   const startVisualFeedback = () => {
+      // This just shows pulsing - no fixed countdown
+      // Countdown resets when speech detected
+   };
 
    const startListening = async () => {
       setState(STATES.LISTENING);
-      setStatusText('Listening... speak now');
+      setStatusText('🎤 Listening... speak now');
       setTranscribedText('');
       setResults([]);
       setSummary('');
+      setSilenceCountdown(3);
+      clearAllTimers();
 
       try {
          const hasPermission = await VoiceService.requestPermission();
@@ -87,66 +144,72 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
          }
 
          startPulse();
-         await VoiceService.startRecording();
-
-         // Auto stop after 8 seconds
-         if (autoStopTimer.current) clearTimeout(autoStopTimer.current);
-         autoStopTimer.current = setTimeout(async () => {
-            if (state === STATES.LISTENING) {
-               await processVoice();
+         await VoiceService.startRecording(() => {
+            // Silence detected - auto process
+            if (isRecording.current) {
+               processVoice();
             }
-         }, 8000);
+         }); isRecording.current = true;
+         setStatusText('🎤 Listening... speak now\n(auto-stops after 3s silence)');
+
+         // Start visual countdown that resets when speech detected
+         startVisualFeedback();
+
       } catch (e) {
+         console.error('Start listening error:', e);
          setState(STATES.ERROR);
          setErrorText('Could not start listening. Please try again.');
       }
    };
 
    const processVoice = async () => {
-      if (autoStopTimer.current) clearTimeout(autoStopTimer.current);
+      if (!isRecording.current) return;
+      isRecording.current = false;
+      clearAllTimers();
       stopPulse();
+
       try {
          // Step 1 — Transcribe
          setState(STATES.TRANSCRIBING);
-         setStatusText('Transcribing your voice...');
+         setStatusText('⏳ Transcribing your voice...');
+
          let filePath;
          try {
             filePath = await VoiceService.stopRecording();
          } catch (e) {
             filePath = null;
          }
+
          if (!filePath) {
             throw new Error('Recording failed');
          }
+
          const text = await VoiceService.transcribeAudio(filePath);
          setTranscribedText(text);
 
          // Step 2 — Get Intent
          setState(STATES.PROCESSING);
-         setStatusText('Understanding your request...');
+         setStatusText('🤖 Understanding your request...');
          const intent = await IntentService.getIntent(text);
 
          if (intent.intent === 'add_reminder') {
-            // Navigate to AddReminder screen with pre-filled data
             onClose();
             onAddReminder(intent);
          } else if (intent.intent === 'query_reminders') {
-            setStatusText('Fetching your reminders...');
+            setStatusText('🔍 Fetching your reminders...');
             const queryResults = await IntentService.queryReminders(intent);
 
-            setStatusText('Generating summary...');
+            setStatusText('✨ Generating summary...');
             const aiSummary = await IntentService.generateSummary(
                queryResults,
                intent.summary_request || text,
             );
 
-            // Set all state at once before changing state
             setResults(queryResults);
             setSummary(aiSummary);
             setStatusText('');
             setState(STATES.RESULTS);
          } else {
-            // Unknown intent - treat as query all
             const queryResults = await IntentService.queryReminders({
                query_type: 'upcoming',
             });
@@ -211,16 +274,31 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
                         <Text style={styles.micEmoji}>🎤</Text>
                      </View>
                   </Animated.View>
+
+                  {/* Silence countdown */}
+                  <View style={styles.countdownContainer}>
+                     <Text style={styles.countdownLabel}>Auto-stops in</Text>
+                     <Text style={styles.countdownNumber}>{silenceCountdown}s</Text>
+                  </View>
+
                   <Text style={styles.statusText}>{statusText}</Text>
                   <Text style={styles.hintText}>
                      Try: "Remind me to call doctor tomorrow at 3 PM"{'\n'}
                      or: "Show reminders at office"
                   </Text>
-                  <TouchableOpacity
-                     style={styles.stopBtn}
-                     onPress={processVoice}>
-                     <Text style={styles.stopBtnText}>⏹ Stop & Process</Text>
-                  </TouchableOpacity>
+
+                  <View style={styles.buttonRow}>
+                     <TouchableOpacity
+                        style={styles.stopBtn}
+                        onPress={processVoice}>
+                        <Text style={styles.stopBtnText}>⏹ Stop Now</Text>
+                     </TouchableOpacity>
+                     <TouchableOpacity
+                        style={styles.cancelBtn}
+                        onPress={onClose}>
+                        <Text style={styles.cancelBtnText}>✕ Cancel</Text>
+                     </TouchableOpacity>
+                  </View>
                </View>
             );
 
@@ -244,13 +322,11 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
          case STATES.RESULTS:
             return (
                <ScrollView showsVerticalScrollIndicator={false}>
-                  {/* AI Summary */}
                   <View style={styles.summaryBox}>
                      <Text style={styles.summaryIcon}>🤖</Text>
                      <Text style={styles.summaryText}>{summary}</Text>
                   </View>
 
-                  {/* Transcribed text */}
                   {transcribedText ? (
                      <View style={styles.transcribedBox}>
                         <Text style={styles.transcribedLabel}>You asked:</Text>
@@ -260,12 +336,10 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
                      </View>
                   ) : null}
 
-                  {/* Results count */}
                   <Text style={styles.resultsCount}>
                      {results.length} reminder{results.length !== 1 ? 's' : ''} found
                   </Text>
 
-                  {/* Reminder list */}
                   {results.length > 0 ? (
                      <FlatList
                         data={results}
@@ -280,7 +354,6 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
                      </View>
                   )}
 
-                  {/* Ask again button */}
                   <TouchableOpacity
                      style={styles.askAgainBtn}
                      onPress={startListening}>
@@ -294,9 +367,7 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
                <View style={styles.errorContainer}>
                   <Text style={styles.errorEmoji}>😕</Text>
                   <Text style={styles.errorText}>{errorText}</Text>
-                  <TouchableOpacity
-                     style={styles.retryBtn}
-                     onPress={startListening}>
+                  <TouchableOpacity style={styles.retryBtn} onPress={startListening}>
                      <Text style={styles.retryBtnText}>🎤 Try Again</Text>
                   </TouchableOpacity>
                </View>
@@ -315,15 +386,14 @@ const VoiceAssistantModal = ({ visible, onClose, onAddReminder }) => {
          onRequestClose={onClose}>
          <View style={styles.overlay}>
             <View style={styles.container}>
-               {/* Header */}
                <View style={styles.header}>
-                  <Text style={styles.headerTitle}>🎤 Voice Assistant</Text>
+                  <Text style={styles.headerTitle}>
+                     {triggeredByWakeWord ? '🎤 Hey RemainApp!' : '🎤 Voice Assistant'}
+                  </Text>
                   <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
                      <Text style={styles.closeBtnText}>✕</Text>
                   </TouchableOpacity>
                </View>
-
-               {/* Content */}
                <View style={styles.content}>{renderContent()}</View>
             </View>
          </View>
@@ -336,13 +406,14 @@ const styles = StyleSheet.create({
       flex: 1,
       backgroundColor: '#00000080',
       justifyContent: 'flex-end',
+      paddingBottom: 40,
    },
    container: {
       backgroundColor: Colors.background,
       borderTopLeftRadius: 24,
       borderTopRightRadius: 24,
       maxHeight: '85%',
-      minHeight: '50%',
+      minHeight: '55%',
    },
    header: {
       flexDirection: 'row',
@@ -352,26 +423,11 @@ const styles = StyleSheet.create({
       borderBottomWidth: 1,
       borderBottomColor: Colors.border,
    },
-   headerTitle: {
-      fontSize: 18,
-      fontWeight: 'bold',
-      color: Colors.text,
-   },
-   closeBtn: {
-      padding: 4,
-   },
-   closeBtnText: {
-      fontSize: 18,
-      color: Colors.textLight,
-   },
-   content: {
-      flex: 1,
-      padding: 20,
-   },
-   listeningContainer: {
-      alignItems: 'center',
-      paddingVertical: 20,
-   },
+   headerTitle: { fontSize: 18, fontWeight: 'bold', color: Colors.text },
+   closeBtn: { padding: 4 },
+   closeBtnText: { fontSize: 18, color: Colors.textLight },
+   content: { flex: 1, padding: 20 },
+   listeningContainer: { alignItems: 'center', paddingVertical: 20 },
    pulseRing: {
       width: 120,
       height: 120,
@@ -379,7 +435,7 @@ const styles = StyleSheet.create({
       backgroundColor: Colors.primary + '30',
       alignItems: 'center',
       justifyContent: 'center',
-      marginBottom: 24,
+      marginBottom: 16,
    },
    micCircle: {
       width: 80,
@@ -389,38 +445,54 @@ const styles = StyleSheet.create({
       alignItems: 'center',
       justifyContent: 'center',
    },
-   micEmoji: {
-      fontSize: 36,
+   micEmoji: { fontSize: 36 },
+   countdownContainer: {
+      alignItems: 'center',
+      marginBottom: 12,
+      backgroundColor: Colors.primary + '15',
+      paddingHorizontal: 20,
+      paddingVertical: 8,
+      borderRadius: 20,
+   },
+   countdownLabel: { fontSize: 12, color: Colors.textLight },
+   countdownNumber: {
+      fontSize: 28,
+      fontWeight: 'bold',
+      color: Colors.primary,
    },
    statusText: {
-      fontSize: 16,
+      fontSize: 15,
       fontWeight: '600',
       color: Colors.text,
       textAlign: 'center',
-      marginBottom: 12,
+      marginBottom: 10,
    },
    hintText: {
       fontSize: 13,
       color: Colors.textLight,
       textAlign: 'center',
       lineHeight: 20,
-      marginBottom: 24,
+      marginBottom: 20,
+   },
+   buttonRow: {
+      flexDirection: 'row',
+      gap: 12,
    },
    stopBtn: {
       backgroundColor: Colors.error,
-      paddingHorizontal: 24,
+      paddingHorizontal: 20,
       paddingVertical: 12,
       borderRadius: 20,
    },
-   stopBtnText: {
-      color: Colors.white,
-      fontWeight: '600',
-      fontSize: 15,
+   stopBtnText: { color: Colors.white, fontWeight: '600', fontSize: 14 },
+   cancelBtn: {
+      backgroundColor: Colors.border,
+      paddingHorizontal: 20,
+      paddingVertical: 12,
+      borderRadius: 20,
    },
-   processingContainer: {
-      alignItems: 'center',
-      paddingVertical: 30,
-   },
+   cancelBtnText: { color: Colors.text, fontWeight: '600', fontSize: 14 },
+   processingContainer: { alignItems: 'center', paddingVertical: 30 },
    transcribedBox: {
       backgroundColor: Colors.white,
       borderRadius: 12,
@@ -430,16 +502,8 @@ const styles = StyleSheet.create({
       borderLeftColor: Colors.primary,
       width: '100%',
    },
-   transcribedLabel: {
-      fontSize: 11,
-      color: Colors.textLight,
-      marginBottom: 4,
-   },
-   transcribedText: {
-      fontSize: 14,
-      color: Colors.text,
-      fontStyle: 'italic',
-   },
+   transcribedLabel: { fontSize: 11, color: Colors.textLight, marginBottom: 4 },
+   transcribedText: { fontSize: 14, color: Colors.text, fontStyle: 'italic' },
    summaryBox: {
       backgroundColor: Colors.primary + '15',
       borderRadius: 12,
@@ -450,20 +514,9 @@ const styles = StyleSheet.create({
       borderWidth: 1,
       borderColor: Colors.primary + '30',
    },
-   summaryIcon: {
-      fontSize: 24,
-   },
-   summaryText: {
-      flex: 1,
-      fontSize: 14,
-      color: Colors.text,
-      lineHeight: 22,
-   },
-   resultsCount: {
-      fontSize: 13,
-      color: Colors.textLight,
-      marginBottom: 12,
-   },
+   summaryIcon: { fontSize: 24 },
+   summaryText: { flex: 1, fontSize: 14, color: Colors.text, lineHeight: 22 },
+   resultsCount: { fontSize: 13, color: Colors.textLight, marginBottom: 12 },
    reminderItem: {
       backgroundColor: Colors.white,
       borderRadius: 12,
@@ -473,42 +526,20 @@ const styles = StyleSheet.create({
       gap: 12,
       elevation: 1,
    },
-   reminderItemLeft: {
-      justifyContent: 'center',
-   },
-   reminderItemIcon: {
-      fontSize: 20,
-   },
-   reminderItemContent: {
-      flex: 1,
-   },
+   reminderItemLeft: { justifyContent: 'center' },
+   reminderItemIcon: { fontSize: 20 },
+   reminderItemContent: { flex: 1 },
    reminderItemTitle: {
       fontSize: 14,
       fontWeight: '600',
       color: Colors.text,
       marginBottom: 4,
    },
-   reminderItemLocation: {
-      fontSize: 12,
-      color: Colors.primary,
-      marginBottom: 2,
-   },
-   reminderItemTime: {
-      fontSize: 12,
-      color: Colors.textLight,
-   },
-   noResults: {
-      alignItems: 'center',
-      paddingVertical: 30,
-   },
-   noResultsEmoji: {
-      fontSize: 40,
-      marginBottom: 10,
-   },
-   noResultsText: {
-      fontSize: 15,
-      color: Colors.textLight,
-   },
+   reminderItemLocation: { fontSize: 12, color: Colors.primary, marginBottom: 2 },
+   reminderItemTime: { fontSize: 12, color: Colors.textLight },
+   noResults: { alignItems: 'center', paddingVertical: 30 },
+   noResultsEmoji: { fontSize: 40, marginBottom: 10 },
+   noResultsText: { fontSize: 15, color: Colors.textLight },
    askAgainBtn: {
       backgroundColor: Colors.primary,
       borderRadius: 12,
@@ -517,19 +548,9 @@ const styles = StyleSheet.create({
       marginTop: 16,
       marginBottom: 8,
    },
-   askAgainBtnText: {
-      color: Colors.white,
-      fontWeight: '600',
-      fontSize: 15,
-   },
-   errorContainer: {
-      alignItems: 'center',
-      paddingVertical: 30,
-   },
-   errorEmoji: {
-      fontSize: 50,
-      marginBottom: 16,
-   },
+   askAgainBtnText: { color: Colors.white, fontWeight: '600', fontSize: 15 },
+   errorContainer: { alignItems: 'center', paddingVertical: 30 },
+   errorEmoji: { fontSize: 50, marginBottom: 16 },
    errorText: {
       fontSize: 15,
       color: Colors.text,
@@ -542,11 +563,7 @@ const styles = StyleSheet.create({
       paddingVertical: 12,
       borderRadius: 20,
    },
-   retryBtnText: {
-      color: Colors.white,
-      fontWeight: '600',
-      fontSize: 15,
-   },
+   retryBtnText: { color: Colors.white, fontWeight: '600', fontSize: 15 },
 });
 
 export default VoiceAssistantModal;

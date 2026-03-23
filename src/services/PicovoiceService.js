@@ -1,41 +1,52 @@
 import {
    PermissionsAndroid,
    Platform,
+   AppState,
 } from 'react-native';
-import {
-   PorcupineManager,
-} from '@picovoice/porcupine-react-native';
+import { PorcupineManager } from '@picovoice/porcupine-react-native';
 import Config from '../constants/Config';
+import AppForegroundService from './AppForegroundService';
 
 let porcupineManager = null;
+let onWakeWordCallback = null;
 
 const PicovoiceService = {
 
-   init: async (onWakeWord) => {
+   init: async onWakeWord => {
       try {
          console.log('Porcupine init starting...');
-         console.log('Access key:', Config.PICOVOICE_ACCESS_KEY ? 'present' : 'missing');
-         console.log('Wake word file:', Config.WAKE_WORD_FILE);
+         onWakeWordCallback = onWakeWord;
+
+         if (!PorcupineManager) {
+            console.warn('PorcupineManager not available');
+            return false;
+         }
+
+         await new Promise(resolve => setTimeout(resolve, 2000));
          const hasPermission = await PicovoiceService.requestPermission();
+
          if (!hasPermission) {
             console.warn('Microphone permission denied for Picovoice');
             return false;
          }
 
-         // Stop existing instance first
          await PicovoiceService.stop();
 
-         // Create PorcupineManager with custom wake word file
          porcupineManager = await PorcupineManager.fromKeywordPaths(
             Config.PICOVOICE_ACCESS_KEY,
             [Config.WAKE_WORD_FILE],
             (keywordIndex) => {
                console.log('Wake word detected! Index:', keywordIndex);
-               if (onWakeWord) {
-                  onWakeWord();
-               }
+               // Bring app to foreground first
+               AppForegroundService.bringToForeground();
+               // Longer delay to let app fully come to foreground
+               setTimeout(() => {
+                  if (onWakeWordCallback) {
+                     onWakeWordCallback();
+                  }
+               }, 1000);
             },
-            (error) => {
+            error => {
                console.error('Porcupine error:', error);
             },
          );
@@ -46,6 +57,28 @@ const PicovoiceService = {
       } catch (e) {
          console.error('Porcupine init error:', e);
          return false;
+      }
+   },
+
+   pauseForVoiceInput: async () => {
+      try {
+         if (porcupineManager) {
+            await porcupineManager.stop();
+            console.log('Porcupine paused for voice input');
+         }
+      } catch (e) {
+         console.error('Porcupine pause error:', e);
+      }
+   },
+
+   resumeAfterVoiceInput: async () => {
+      try {
+         if (porcupineManager) {
+            await porcupineManager.start();
+            console.log('Porcupine resumed after voice input');
+         }
+      } catch (e) {
+         console.error('Porcupine resume error:', e);
       }
    },
 

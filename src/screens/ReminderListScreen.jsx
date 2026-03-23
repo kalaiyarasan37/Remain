@@ -7,6 +7,7 @@ import {
    TouchableOpacity,
    StatusBar,
    Alert,
+   Modal,
 } from 'react-native';
 import Colors from '../constants/Colors';
 import ReminderService from '../services/ReminderService';
@@ -16,6 +17,8 @@ const FILTERS = ['all', 'upcoming', 'completed', 'deleted'];
 const ReminderListScreen = ({ navigation }) => {
    const [reminders, setReminders] = useState([]);
    const [filter, setFilter] = useState('all');
+   const [selectedReminder, setSelectedReminder] = useState(null);
+   const [showModal, setShowModal] = useState(false);
 
    useEffect(() => {
       loadReminders();
@@ -79,6 +82,50 @@ const ReminderListScreen = ({ navigation }) => {
       );
    };
 
+   const handleReminderPress = (item) => {
+      setSelectedReminder(item);
+      setShowModal(true);
+   };
+
+   const formatFullDateTime = (dateTime) => {
+      const date = new Date(dateTime);
+      return {
+         date: date.toLocaleDateString('en-IN', {
+            weekday: 'long',
+            day: '2-digit',
+            month: 'long',
+            year: 'numeric',
+         }),
+         time: date.toLocaleTimeString('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+         }),
+      };
+   };
+
+   const handleMarkDoneFromModal = async () => {
+      if (!selectedReminder) return;
+      await ReminderService.markComplete(selectedReminder.id);
+      setShowModal(false);
+      loadReminders();
+   };
+
+   const handleDeleteFromModal = () => {
+      Alert.alert('Delete Reminder', 'Move to deleted section?', [
+         { text: 'Cancel', style: 'cancel' },
+         {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+               await ReminderService.delete(selectedReminder.id);
+               setShowModal(false);
+               loadReminders();
+            },
+         },
+      ]);
+   };
+
    const handleRestore = async (id) => {
       await ReminderService.restore(id);
       loadReminders();
@@ -136,12 +183,14 @@ const ReminderListScreen = ({ navigation }) => {
       const isDeletedItem = item.isDeleted;
 
       return (
-         <View
+         <TouchableOpacity
             style={[
                styles.card,
                item.isCompleted && !isDeletedItem && styles.cardCompleted,
                isDeletedItem && styles.cardDeleted,
-            ]}>
+            ]}
+            onPress={() => handleReminderPress(item)}
+            activeOpacity={0.8}>
             {/* Left color bar */}
             <View
                style={[
@@ -149,8 +198,8 @@ const ReminderListScreen = ({ navigation }) => {
                   isDeletedItem
                      ? styles.colorBarDeleted
                      : item.isCompleted
-                     ? styles.colorBarCompleted
-                     : styles.colorBarActive,
+                        ? styles.colorBarCompleted
+                        : styles.colorBarActive,
                ]}
             />
 
@@ -224,7 +273,8 @@ const ReminderListScreen = ({ navigation }) => {
                   </View>
                )}
             </View>
-         </View>
+
+         </TouchableOpacity>
       );
    };
 
@@ -317,7 +367,71 @@ const ReminderListScreen = ({ navigation }) => {
                showsVerticalScrollIndicator={false}
             />
          )}
+         {/* Reminder Detail Modal */}
+         <Modal
+            visible={showModal}
+            transparent
+            animationType="slide"
+            onRequestClose={() => setShowModal(false)}>
+            <View style={styles.modalOverlay}>
+               <View style={styles.modalBox}>
+                  {selectedReminder && (() => {
+                     const dt = formatFullDateTime(selectedReminder.dateTime);
+                     const isDeleted = selectedReminder.isDeleted;
+                     return (
+                        <>
+                           <Text style={styles.modalTitle} numberOfLines={3}>
+                              {selectedReminder.title}
+                           </Text>
+                           {selectedReminder.location ? (
+                              <Text style={styles.modalLocation}>
+                                 📍 {selectedReminder.location}
+                              </Text>
+                           ) : null}
+                           <Text style={styles.modalDate}>📅 {dt.date}</Text>
+                           <Text style={styles.modalTime}>🕐 {dt.time}</Text>
+                           <View style={styles.modalBadgeRow}>
+                              {isDeleted ? (
+                                 <View style={[styles.badge, { backgroundColor: Colors.border }]}>
+                                    <Text style={{ color: Colors.textLight, fontWeight: '600' }}>🗑 Deleted</Text>
+                                 </View>
+                              ) : selectedReminder.isCompleted ? (
+                                 <View style={[styles.badge, { backgroundColor: Colors.success + '20' }]}>
+                                    <Text style={{ color: Colors.success, fontWeight: '600' }}>✅ Completed</Text>
+                                 </View>
+                              ) : (
+                                 <View style={[styles.badge, { backgroundColor: Colors.primary + '20' }]}>
+                                    <Text style={{ color: Colors.primary, fontWeight: '600' }}>🔔 Pending</Text>
+                                 </View>
+                              )}
+                           </View>
+                           <View style={styles.modalButtons}>
+                              {!selectedReminder.isCompleted && !isDeleted && (
+                                 <TouchableOpacity
+                                    style={styles.modalEditBtn}
+                                    onPress={() => {
+                                       setShowModal(false);
+                                       navigation.navigate('AddReminder', {
+                                          editReminder: selectedReminder,
+                                       });
+                                    }}>
+                                    <Text style={styles.modalEditBtnText}>✏️ Edit</Text>
+                                 </TouchableOpacity>
+                              )}
+                              <TouchableOpacity
+                                 style={styles.modalCloseBtn}
+                                 onPress={() => setShowModal(false)}>
+                                 <Text style={styles.modalCloseBtnText}>Close</Text>
+                              </TouchableOpacity>
+                           </View>
+                        </>
+                     );
+                  })()}
+               </View>
+            </View>
+         </Modal>
       </View>
+
    );
 };
 
@@ -575,6 +689,96 @@ const styles = StyleSheet.create({
       fontWeight: '600',
       fontSize: 15,
    },
+   modalOverlay: {
+      flex: 1,
+      backgroundColor: '#00000060',
+      justifyContent: 'flex-end',
+   },
+   modalBox: {
+      backgroundColor: Colors.white,
+      borderTopLeftRadius: 24,
+      borderTopRightRadius: 24,
+      padding: 24,
+   },
+   modalTitle: {
+      fontSize: 18,
+      fontWeight: 'bold',
+      color: Colors.text,
+      marginBottom: 12,
+   },
+   modalLocation: {
+      fontSize: 14,
+      color: Colors.primary,
+      marginBottom: 6,
+   },
+   modalDate: {
+      fontSize: 14,
+      color: Colors.textLight,
+      marginBottom: 4,
+   },
+   modalTime: {
+      fontSize: 14,
+      color: Colors.textLight,
+      marginBottom: 12,
+   },
+   modalBadgeRow: {
+      flexDirection: 'row',
+      marginBottom: 16,
+   },
+   badge: {
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 20,
+   },
+   modalButtons: {
+      flexDirection: 'row',
+      gap: 10,
+   },
+   modalDoneBtn: {
+      flex: 1,
+      backgroundColor: Colors.success,
+      borderRadius: 12,
+      paddingVertical: 12,
+      alignItems: 'center',
+   },
+   modalDoneBtnText: {
+      color: Colors.white,
+      fontWeight: '600',
+   },
+   modalDeleteBtn: {
+      flex: 1,
+      backgroundColor: Colors.error + '15',
+      borderRadius: 12,
+      paddingVertical: 12,
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: Colors.error + '30',
+   },
+   modalDeleteBtnText: {
+      color: Colors.error,
+      fontWeight: '600',
+   },
+   modalCloseBtn: {
+      flex: 1,
+      backgroundColor: Colors.border,
+      borderRadius: 12,
+      paddingVertical: 12,
+      alignItems: 'center',
+   },
+   modalCloseBtnText: {
+      color: Colors.textLight,
+      fontWeight: '600',
+   },
+   modalEditBtn: {
+   flex: 1,
+   backgroundColor: Colors.primary + '15',
+   borderRadius: 12,
+   paddingVertical: 12,
+   alignItems: 'center',
+   borderWidth: 1,
+   borderColor: Colors.primary + '30',
+},
+modalEditBtnText: {color: Colors.primary, fontWeight: '600'},
 });
 
 export default ReminderListScreen;

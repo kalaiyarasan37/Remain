@@ -8,33 +8,72 @@ import {
    StatusBar,
    Alert,
    Modal,
+   NativeEventEmitter,
+   NativeModules,
+   PermissionsAndroid,
+   Platform,
+   ScrollView,
 } from 'react-native';
 import Colors from '../constants/Colors';
 import ReminderService from '../services/ReminderService';
 import Storage from '../utils/Storage';
 import PicovoiceService from '../services/PicovoiceService';
 import VoiceAssistantModal from '../components/VoiceAssistantModal';
+import NotificationService from '../services/NotificationService';
+
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = [
+   'January', 'February', 'March', 'April', 'May', 'June',
+   'July', 'August', 'September', 'October', 'November', 'December',
+];
 
 const HomeScreen = ({ navigation }) => {
    const [showVoiceAssistant, setShowVoiceAssistant] = useState(false);
    const [upcomingReminders, setUpcomingReminders] = useState([]);
+   const [allReminders, setAllReminders] = useState([]);
    const [user, setUser] = useState(null);
    const [greeting, setGreeting] = useState('');
    const [selectedReminder, setSelectedReminder] = useState(null);
    const [showModal, setShowModal] = useState(false);
+
+   // Calendar state
+   const today = new Date();
+   const [calendarMonth, setCalendarMonth] = useState(today.getMonth());
+   const [calendarYear, setCalendarYear] = useState(today.getFullYear());
+   const [selectedDate, setSelectedDate] = useState(null);
+   const [selectedDateReminders, setSelectedDateReminders] = useState([]);
+
    useEffect(() => {
       loadData();
+      NotificationService.init();
       setGreetingMessage();
       const unsubscribe = navigation.addListener('focus', loadData);
 
-      // Start wake word detection
+      const requestNotificationPermission = async () => {
+         if (Platform.OS === 'android' && Platform.Version >= 33) {
+            await PermissionsAndroid.request(
+               PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+            );
+         }
+      };
+      requestNotificationPermission();
+
       PicovoiceService.init(() => {
          setShowVoiceAssistant(true);
       });
 
+      const eventEmitter = new NativeEventEmitter(NativeModules.AppForeground);
+      const wakeWordSubscription = eventEmitter.addListener(
+         'WAKE_WORD_DETECTED',
+         () => {
+            setShowVoiceAssistant(true);
+         },
+      );
+
       return () => {
          unsubscribe();
          PicovoiceService.stop();
+         wakeWordSubscription.remove();
       };
    }, [navigation]);
 
@@ -43,6 +82,8 @@ const HomeScreen = ({ navigation }) => {
       setUser(userData);
       const reminders = await ReminderService.getUpcoming();
       setUpcomingReminders(reminders.slice(0, 5));
+      const all = await ReminderService.getAll();
+      setAllReminders(all.filter(r => !r.isDeleted));
    };
 
    const setGreetingMessage = () => {
@@ -52,21 +93,7 @@ const HomeScreen = ({ navigation }) => {
       else setGreeting('Good Evening');
    };
 
-   // const handleLogout = () => {
-   //    Alert.alert('Logout', 'Are you sure you want to logout?', [
-   //       { text: 'Cancel', style: 'cancel' },
-   //       {
-   //          text: 'Logout',
-   //          style: 'destructive',
-   //          onPress: async () => {
-   //             await Storage.remove('user');
-   //             navigation.replace('Login');
-   //          },
-   //       },
-   //    ]);
-   // };
-
-   const formatDateTime = (dateTime) => {
+   const formatDateTime = dateTime => {
       const date = new Date(dateTime);
       return date.toLocaleString('en-IN', {
          day: '2-digit',
@@ -76,7 +103,7 @@ const HomeScreen = ({ navigation }) => {
       });
    };
 
-   const formatFullDateTime = (dateTime) => {
+   const formatFullDateTime = dateTime => {
       const date = new Date(dateTime);
       return {
          date: date.toLocaleDateString('en-IN', {
@@ -93,25 +120,27 @@ const HomeScreen = ({ navigation }) => {
       };
    };
 
-   const handleReminderPress = (item) => {
+   const handleReminderPress = item => {
       setSelectedReminder(item);
       setShowModal(true);
    };
 
    const handleMarkDone = async () => {
-      await ReminderService.complete(selectedReminder.id);
+      if (!selectedReminder) return;
+      await ReminderService.markComplete(selectedReminder.id);
       setShowModal(false);
       loadData();
    };
 
-   const handleDelete = () => {
-      Alert.alert('Delete Reminder', 'Are you sure?', [
+   const handleDelete = async () => {
+      if (!selectedReminder) return;
+      Alert.alert('Delete Reminder', 'Move to deleted?', [
          { text: 'Cancel', style: 'cancel' },
          {
             text: 'Delete',
             style: 'destructive',
             onPress: async () => {
-               await ReminderService.delete(selectedReminder.id);
+               await ReminderService.softDelete(selectedReminder.id);
                setShowModal(false);
                loadData();
             },
@@ -119,85 +148,286 @@ const HomeScreen = ({ navigation }) => {
       ]);
    };
 
-   const renderReminderItem = ({ item }) => (
-      <TouchableOpacity
-         style={styles.reminderCard}
-         onPress={() => handleReminderPress(item)}>
-         <View style={styles.reminderLeft}>
-            <Text style={styles.reminderIcon}>{item.isVoice ? '🎤' : '✏️'}</Text>
-         </View>
-         <View style={styles.reminderContent}>
-            <Text style={styles.reminderTitle} numberOfLines={1}>
-               {item.title}
-            </Text>
-            <Text style={styles.reminderTime}>{formatDateTime(item.dateTime)}</Text>
-         </View>
-         <Text style={styles.arrowIcon}>›</Text>
-      </TouchableOpacity>
-   );
+   // ── Calendar helpers ──────────────────────────────────────
+   const getDaysInMonth = (month, year) => new Date(year, month + 1, 0).getDate();
+   const getFirstDayOfMonth = (month, year) => new Date(year, month, 1).getDay();
+
+   const getRemindersForDate = (day, month, year) => {
+      return allReminders.filter(r => {
+         const d = new Date(r.dateTime);
+         return (
+            d.getDate() === day &&
+            d.getMonth() === month &&
+            d.getFullYear() === year
+         );
+      });
+   };
+
+   const hasReminder = (day, month, year) =>
+      getRemindersForDate(day, month, year).length > 0;
+
+   const handleDatePress = (day) => {
+      const dateKey = `${calendarYear}-${calendarMonth}-${day}`;
+      if (selectedDate === dateKey) {
+         setSelectedDate(null);
+         setSelectedDateReminders([]);
+      } else {
+         setSelectedDate(dateKey);
+         setSelectedDateReminders(getRemindersForDate(day, calendarMonth, calendarYear));
+      }
+   };
+
+   const prevMonth = () => {
+      if (calendarMonth === 0) {
+         setCalendarMonth(11);
+         setCalendarYear(y => y - 1);
+      } else {
+         setCalendarMonth(m => m - 1);
+      }
+      setSelectedDate(null);
+      setSelectedDateReminders([]);
+   };
+
+   const nextMonth = () => {
+      if (calendarMonth === 11) {
+         setCalendarMonth(0);
+         setCalendarYear(y => y + 1);
+      } else {
+         setCalendarMonth(m => m + 1);
+      }
+      setSelectedDate(null);
+      setSelectedDateReminders([]);
+   };
+
+   const renderCalendar = () => {
+      const daysInMonth = getDaysInMonth(calendarMonth, calendarYear);
+      const firstDay = getFirstDayOfMonth(calendarMonth, calendarYear);
+      const cells = [];
+
+      // Empty cells before first day
+      for (let i = 0; i < firstDay; i++) {
+         cells.push(<View key={`empty-${i}`} style={styles.calCell} />);
+      }
+
+      // Day cells
+      for (let day = 1; day <= daysInMonth; day++) {
+         const isToday =
+            day === today.getDate() &&
+            calendarMonth === today.getMonth() &&
+            calendarYear === today.getFullYear();
+         const dateKey = `${calendarYear}-${calendarMonth}-${day}`;
+         const isSelected = selectedDate === dateKey;
+         const hasRem = hasReminder(day, calendarMonth, calendarYear);
+
+         cells.push(
+            <TouchableOpacity
+               key={day}
+               style={[
+                  styles.calCell,
+                  isToday && styles.calCellToday,
+                  isSelected && styles.calCellSelected,
+               ]}
+               onPress={() => handleDatePress(day)}>
+               <Text
+                  style={[
+                     styles.calCellText,
+                     isToday && styles.calCellTodayText,
+                     isSelected && styles.calCellSelectedText,
+                  ]}>
+                  {day}
+               </Text>
+               {hasRem && (
+                  <View
+                     style={[
+                        styles.calDot,
+                        isSelected && styles.calDotSelected,
+                     ]}
+                  />
+               )}
+            </TouchableOpacity>,
+         );
+      }
+
+      return cells;
+   };
+
+   const getSelectedDateLabel = () => {
+      if (!selectedDate) return '';
+      const [y, m, d] = selectedDate.split('-').map(Number);
+      return new Date(y, m, d).toLocaleDateString('en-IN', {
+         weekday: 'long',
+         day: '2-digit',
+         month: 'long',
+         year: 'numeric',
+      });
+   };
 
    return (
       <View style={styles.container}>
          <StatusBar barStyle="light-content" backgroundColor={Colors.primary} />
 
          {/* Header */}
-         {/* Header */}
          <View style={styles.header}>
+            <View>
+               <Text style={styles.greeting}>{greeting} 👋</Text>
+               <Text style={styles.userName}>{user?.name || 'User'}</Text>
+            </View>
             <TouchableOpacity
-               style={styles.profileSection}
+               style={styles.profileBtn}
                onPress={() => navigation.navigate('Profile')}>
-               <View style={styles.profileAvatar}>
-                  <Text style={styles.profileAvatarText}>
-                     {user?.name ? user.name.charAt(0).toUpperCase() : '?'}
-                  </Text>
-               </View>
-               <View>
-                  <Text style={styles.profileName}>{user?.name || 'User'}</Text>
-                  <Text style={styles.profilePhone}>
-                     {user?.countryCode || '+91'} {user?.phone || ''}
-                  </Text>
-               </View>
-            </TouchableOpacity>
-            <Text style={styles.greetingBadge}>{greeting} 👋</Text>
-         </View>
-
-         {/* Quick Actions */}
-         <View style={styles.quickActions}>
-
-            <TouchableOpacity
-               style={styles.actionCard}
-               onPress={() => navigation.navigate('ReminderList')}>
-               <Text style={styles.actionEmoji}>📋</Text>
-               <Text style={styles.actionText}>All Reminders</Text>
+               <Text style={styles.profileInitial}>
+                  {user?.name?.[0]?.toUpperCase() || 'U'}
+               </Text>
             </TouchableOpacity>
          </View>
 
-         {/* Upcoming Reminders */}
-         <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-               <Text style={styles.sectionTitle}>Upcoming Reminders</Text>
-               <TouchableOpacity onPress={() => navigation.navigate('ReminderList')}>
-                  <Text style={styles.seeAll}>See All</Text>
-               </TouchableOpacity>
+         <ScrollView showsVerticalScrollIndicator={false}>
+
+            {/* ── Full Month Calendar ─────────────────────────── */}
+            <View style={styles.calendarCard}>
+               {/* Month navigation */}
+               <View style={styles.calHeader}>
+                  <TouchableOpacity onPress={prevMonth} style={styles.calNavBtn}>
+                     <Text style={styles.calNavText}>‹</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.calMonthTitle}>
+                     {MONTHS[calendarMonth]} {calendarYear}
+                  </Text>
+                  <TouchableOpacity onPress={nextMonth} style={styles.calNavBtn}>
+                     <Text style={styles.calNavText}>›</Text>
+                  </TouchableOpacity>
+               </View>
+
+               {/* Day labels */}
+               <View style={styles.calDayLabels}>
+                  {DAYS.map(d => (
+                     <Text key={d} style={styles.calDayLabel}>{d}</Text>
+                  ))}
+               </View>
+
+               {/* Calendar grid */}
+               <View style={styles.calGrid}>{renderCalendar()}</View>
             </View>
 
-            {upcomingReminders.length === 0 ? (
-               <View style={styles.emptyContainer}>
-                  <Text style={styles.emptyEmoji}>🔔</Text>
-                  <Text style={styles.emptyText}>No upcoming reminders</Text>
-                  <Text style={styles.emptySubText}>
-                     Tap Voice or Text to add one!
+            {/* ── Selected Date Reminders ─────────────────────── */}
+            {selectedDate && (
+               <View style={styles.selectedSection}>
+                  <Text style={styles.selectedDateLabel}>
+                     📅 {getSelectedDateLabel()}
                   </Text>
+
+                  {selectedDateReminders.length === 0 ? (
+                     <View style={styles.noReminders}>
+                        <Text style={styles.noRemindersEmoji}>📭</Text>
+                        <Text style={styles.noRemindersText}>
+                           No reminders on this day
+                        </Text>
+                        <TouchableOpacity
+                           style={styles.addReminderBtn}
+                           onPress={() =>
+                              navigation.navigate('AddReminder', { isVoice: false })
+                           }>
+                           <Text style={styles.addReminderBtnText}>+ Add Reminder</Text>
+                        </TouchableOpacity>
+                     </View>
+                  ) : (
+                     selectedDateReminders.map(item => (
+                        <TouchableOpacity
+                           key={item.id}
+                           style={styles.reminderCard}
+                           onPress={() => handleReminderPress(item)}>
+                           <View
+                              style={[
+                                 styles.colorBar,
+                                 item.isCompleted
+                                    ? styles.colorBarDone
+                                    : styles.colorBarActive,
+                              ]}
+                           />
+                           <View style={styles.reminderInfo}>
+                              <Text
+                                 style={[
+                                    styles.reminderTitle,
+                                    item.isCompleted && styles.reminderTitleDone,
+                                 ]}
+                                 numberOfLines={2}>
+                                 {item.title}
+                              </Text>
+                              {item.location ? (
+                                 <Text style={styles.reminderLocation}>
+                                    📍 {item.location}
+                                 </Text>
+                              ) : null}
+                              <Text style={styles.reminderTime}>
+                                 🕐 {formatDateTime(item.dateTime)}
+                              </Text>
+                           </View>
+                           <Text style={styles.reminderStatus}>
+                              {item.isCompleted ? '✅' : '🔔'}
+                           </Text>
+                        </TouchableOpacity>
+                     ))
+                  )}
                </View>
-            ) : (
-               <FlatList
-                  data={upcomingReminders}
-                  keyExtractor={item => item.id}
-                  renderItem={renderReminderItem}
-                  showsVerticalScrollIndicator={false}
-               />
             )}
-         </View>
+
+            {/* ── Upcoming Reminders ──────────────────────────── */}
+            <View style={styles.section}>
+               <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Upcoming Reminders</Text>
+                  <TouchableOpacity
+                     onPress={() => navigation.navigate('ReminderList')}>
+                     <Text style={styles.seeAll}>See All</Text>
+                  </TouchableOpacity>
+               </View>
+
+               {upcomingReminders.length === 0 ? (
+                  <View style={styles.emptyCard}>
+                     <Text style={styles.emptyEmoji}>🎉</Text>
+                     <Text style={styles.emptyText}>No upcoming reminders!</Text>
+                  </View>
+               ) : (
+                  upcomingReminders.map(item => (
+                     <TouchableOpacity
+                        key={item.id}
+                        style={styles.reminderCard}
+                        onPress={() => handleReminderPress(item)}>
+                        <View style={[styles.colorBar, styles.colorBarActive]} />
+                        <View style={styles.reminderInfo}>
+                           <Text style={styles.reminderTitle} numberOfLines={2}>
+                              {item.title}
+                           </Text>
+                           {item.location ? (
+                              <Text style={styles.reminderLocation}>
+                                 📍 {item.location}
+                              </Text>
+                           ) : null}
+                           <Text style={styles.reminderTime}>
+                              🕐 {formatDateTime(item.dateTime)}
+                           </Text>
+                        </View>
+                        <Text style={styles.reminderStatus}>🔔</Text>
+                     </TouchableOpacity>
+                  ))
+               )}
+            </View>
+
+            <View style={{ height: 100 }} />
+         </ScrollView>
+
+         {/* Add Reminder FAB */}
+         <TouchableOpacity
+            style={styles.fab}
+            onPress={() => navigation.navigate('AddReminder', { isVoice: false })}>
+            <Text style={styles.fabText}>+</Text>
+         </TouchableOpacity>
+
+         {/* Voice FAB */}
+         <TouchableOpacity
+            style={styles.voiceFab}
+            onPress={() => setShowVoiceAssistant(true)}>
+            <Text style={styles.voiceFabText}>🎤</Text>
+         </TouchableOpacity>
 
          {/* Reminder Detail Modal */}
          <Modal
@@ -208,110 +438,61 @@ const HomeScreen = ({ navigation }) => {
             <View style={styles.modalOverlay}>
                <View style={styles.modalBox}>
                   {selectedReminder && (() => {
-                     const { date, time } = formatFullDateTime(selectedReminder.dateTime);
+                     const dt = formatFullDateTime(selectedReminder.dateTime);
                      return (
                         <>
-                           {/* Modal Header */}
-                           <View style={styles.modalHeader}>
-                              <Text style={styles.modalIcon}>
-                                 {selectedReminder.isVoice ? '🎤' : '✏️'}
+                           <Text style={styles.modalTitle} numberOfLines={3}>
+                              {selectedReminder.title}
+                           </Text>
+                           {selectedReminder.location ? (
+                              <Text style={styles.modalLocation}>
+                                 📍 {selectedReminder.location}
                               </Text>
-                              <TouchableOpacity onPress={() => setShowModal(false)}>
-                                 <Text style={styles.modalClose}>✕</Text>
-                              </TouchableOpacity>
-                           </View>
-
-                           {/* Title */}
-                           <Text style={styles.modalTitle}>{selectedReminder.title}</Text>
-
-                           {/* Status Badge */}
-                           <View style={styles.badgeRow}>
+                           ) : null}
+                           <Text style={styles.modalDate}>📅 {dt.date}</Text>
+                           <Text style={styles.modalTime}>🕐 {dt.time}</Text>
+                           <View style={styles.modalBadgeRow}>
                               {selectedReminder.isCompleted ? (
                                  <View style={[styles.badge, styles.badgeDone]}>
-                                    <Text style={styles.badgeDoneText}>✓ Completed</Text>
+                                    <Text style={styles.badgeDoneText}>✅ Completed</Text>
                                  </View>
                               ) : (
                                  <View style={[styles.badge, styles.badgePending]}>
-                                    <Text style={styles.badgePendingText}>🔔 Upcoming</Text>
+                                    <Text style={styles.badgePendingText}>🔔 Pending</Text>
                                  </View>
                               )}
                            </View>
-
-                           {/* Details */}
-                           <View style={styles.detailsBox}>
-                              <View style={styles.detailRow}>
-                                 <Text style={styles.detailIcon}>📅</Text>
-                                 <View>
-                                    <Text style={styles.detailLabel}>Date</Text>
-                                    <Text style={styles.detailValue}>{date}</Text>
-                                 </View>
-                              </View>
-                              <View style={styles.detailDivider} />
-                              <View style={styles.detailRow}>
-                                 <Text style={styles.detailIcon}>🕐</Text>
-                                 <View>
-                                    <Text style={styles.detailLabel}>Time</Text>
-                                    <Text style={styles.detailValue}>{time}</Text>
-                                 </View>
-                              </View>
-                              {selectedReminder.description ? (
-                                 <>
-                                    <View style={styles.detailDivider} />
-                                    <View style={styles.detailRow}>
-                                       <Text style={styles.detailIcon}>📝</Text>
-                                       <View style={styles.detailFlex}>
-                                          <Text style={styles.detailLabel}>Description</Text>
-                                          <Text style={styles.detailValue}>
-                                             {selectedReminder.description}
-                                          </Text>
-                                       </View>
-                                    </View>
-                                 </>
-                              ) : null}
-                              {selectedReminder.location ? (
-                                 <>
-                                    <View style={styles.detailDivider} />
-                                    <View style={styles.detailRow}>
-                                       <Text style={styles.detailIcon}>📍</Text>
-                                       <View style={styles.detailFlex}>
-                                          <Text style={styles.detailLabel}>Location</Text>
-                                          <Text style={styles.detailValue}>
-                                             {selectedReminder.location}
-                                          </Text>
-                                       </View>
-                                    </View>
-                                 </>
-                              ) : null}
-                              <View style={styles.detailDivider} />
-                              <View style={styles.detailRow}>
-                                 <Text style={styles.detailIcon}>🗓</Text>
-                                 <View>
-                                    <Text style={styles.detailLabel}>Created</Text>
-                                    <Text style={styles.detailValue}>
-                                       {new Date(selectedReminder.createdAt)
-                                          .toLocaleDateString('en-IN', {
-                                             day: '2-digit',
-                                             month: 'short',
-                                             year: 'numeric',
-                                          })}
-                                    </Text>
-                                 </View>
-                              </View>
-                           </View>
-
-                           {/* Action Buttons */}
-                           {!selectedReminder.isCompleted && (
+                           <View style={styles.modalButtons}>
+                              {!selectedReminder.isCompleted && (
+                                 <TouchableOpacity
+                                    style={styles.doneBtn}
+                                    onPress={handleMarkDone}>
+                                    <Text style={styles.doneBtnText}>✅ Done</Text>
+                                 </TouchableOpacity>
+                              )}
+                              {!selectedReminder.isCompleted && (
+                                 <TouchableOpacity
+                                    style={styles.editBtn}
+                                    onPress={() => {
+                                       setShowModal(false);
+                                       navigation.navigate('AddReminder', {
+                                          editReminder: selectedReminder,
+                                       });
+                                    }}>
+                                    <Text style={styles.editBtnText}>✏️ Edit</Text>
+                                 </TouchableOpacity>
+                              )}
                               <TouchableOpacity
-                                 style={styles.doneButton}
-                                 onPress={handleMarkDone}>
-                                 <Text style={styles.doneButtonText}>✓ Mark as Done</Text>
+                                 style={styles.deleteBtn}
+                                 onPress={handleDelete}>
+                                 <Text style={styles.deleteBtnText}>🗑</Text>
                               </TouchableOpacity>
-                           )}
-                           <TouchableOpacity
-                              style={styles.deleteButton}
-                              onPress={handleDelete}>
-                              <Text style={styles.deleteButtonText}>🗑 Delete Reminder</Text>
-                           </TouchableOpacity>
+                              <TouchableOpacity
+                                 style={styles.closeBtn}
+                                 onPress={() => setShowModal(false)}>
+                                 <Text style={styles.closeBtnText}>Close</Text>
+                              </TouchableOpacity>
+                           </View>
                         </>
                      );
                   })()}
@@ -319,166 +500,191 @@ const HomeScreen = ({ navigation }) => {
             </View>
          </Modal>
 
-         {/* FAB */}
-         <TouchableOpacity
-            style={styles.fab}
-            onPress={() => navigation.navigate('AddReminder', { isVoice: false })}>
-            <Text style={styles.fabText}>+</Text>
-         </TouchableOpacity>
+         {/* Voice Assistant Modal */}
          <VoiceAssistantModal
             visible={showVoiceAssistant}
             onClose={() => setShowVoiceAssistant(false)}
-            onAddReminder={(intent) => {
-               navigation.navigate('AddReminder', {
-                  isVoice: true,
-                  prefillData: intent,
-               });
+            triggeredByWakeWord={true}
+            onAddReminder={intent => {
+               setShowVoiceAssistant(false);
+               setTimeout(() => {
+                  navigation.navigate('AddReminder', {
+                     isVoice: true,
+                     prefillData: intent,
+                  });
+               }, 300);
             }}
          />
-         {/* Voice Assistant FAB */}
-         <TouchableOpacity
-            style={styles.voiceFab}
-            onPress={() => setShowVoiceAssistant(true)}>
-            <Text style={styles.voiceFabText}>🎤</Text>
-         </TouchableOpacity>
       </View>
    );
 };
 
 const styles = StyleSheet.create({
-   container: {
-      flex: 1,
-      backgroundColor: Colors.background,
-   },
+   container: { flex: 1, backgroundColor: Colors.background },
    header: {
       backgroundColor: Colors.primary,
-      paddingHorizontal: 24,
+      paddingHorizontal: 20,
       paddingTop: 50,
-      paddingBottom: 24,
+      paddingBottom: 20,
       flexDirection: 'row',
-      justifyContent: 'space-between',
       alignItems: 'center',
-   },
-   quickActions: {
-      flexDirection: 'row',
-      paddingHorizontal: 16,
-      paddingVertical: 20,
       justifyContent: 'space-between',
    },
-   actionCard: {
-      flex: 1,
-      backgroundColor: Colors.white,
-      borderRadius: 12,
-      padding: 16,
+   greeting: { color: Colors.white, fontSize: 14, opacity: 0.9 },
+   userName: { color: Colors.white, fontSize: 22, fontWeight: 'bold' },
+   profileBtn: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: Colors.white + '30',
       alignItems: 'center',
-      marginHorizontal: 4,
-      elevation: 2,
-      shadowColor: Colors.shadow,
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.1,
-      shadowRadius: 4,
-   },
-   actionCardFull: {
-      flex: 1,
-      backgroundColor: Colors.white,
-      borderRadius: 12,
-      padding: 16,
-      alignItems: 'center',
-      flexDirection: 'row',
       justifyContent: 'center',
-      gap: 10,
-      elevation: 2,
+   },
+   profileInitial: { color: Colors.white, fontSize: 18, fontWeight: 'bold' },
+
+   // ── Calendar ────────────────────────────────────────────
+   calendarCard: {
+      backgroundColor: Colors.white,
+      margin: 16,
+      borderRadius: 16,
+      padding: 16,
+      elevation: 3,
       shadowColor: Colors.shadow,
       shadowOffset: { width: 0, height: 2 },
       shadowOpacity: 0.1,
-      shadowRadius: 4,
+      shadowRadius: 8,
    },
-   actionEmoji: {
-      fontSize: 28,
+   calHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 12,
+   },
+   calNavBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: Colors.primary + '15',
+      alignItems: 'center',
+      justifyContent: 'center',
+   },
+   calNavText: { fontSize: 22, color: Colors.primary, fontWeight: 'bold' },
+   calMonthTitle: { fontSize: 17, fontWeight: 'bold', color: Colors.text },
+   calDayLabels: {
+      flexDirection: 'row',
+      marginBottom: 6,
+   },
+   calDayLabel: {
+      flex: 1,
+      textAlign: 'center',
+      fontSize: 12,
+      color: Colors.textLight,
+      fontWeight: '600',
+   },
+   calGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+   },
+   calCell: {
+      width: '14.28%',
+      aspectRatio: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+   },
+   calCellToday: {
+      backgroundColor: Colors.primary + '20',
+      borderRadius: 20,
+   },
+   calCellSelected: {
+      backgroundColor: Colors.primary,
+      borderRadius: 20,
+   },
+   calCellText: { fontSize: 13, color: Colors.text },
+   calCellTodayText: { color: Colors.primary, fontWeight: 'bold' },
+   calCellSelectedText: { color: Colors.white, fontWeight: 'bold' },
+   calDot: {
+      width: 5,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: Colors.primary,
+      marginTop: 2,
+   },
+   calDotSelected: { backgroundColor: Colors.white },
+
+   // ── Selected date section ────────────────────────────────
+   selectedSection: {
+      marginHorizontal: 16,
       marginBottom: 8,
    },
-   actionText: {
-      fontSize: 12,
-      fontWeight: '600',
-      color: Colors.text,
-      textAlign: 'center',
+   selectedDateLabel: {
+      fontSize: 15,
+      fontWeight: 'bold',
+      color: Colors.primary,
+      marginBottom: 12,
    },
-   section: {
-      flex: 1,
-      paddingHorizontal: 16,
+   noReminders: {
+      backgroundColor: Colors.white,
+      borderRadius: 14,
+      padding: 24,
+      alignItems: 'center',
+      elevation: 1,
    },
+   noRemindersEmoji: { fontSize: 36, marginBottom: 8 },
+   noRemindersText: { fontSize: 14, color: Colors.textLight, marginBottom: 12 },
+   addReminderBtn: {
+      backgroundColor: Colors.primary,
+      paddingHorizontal: 20,
+      paddingVertical: 10,
+      borderRadius: 20,
+   },
+   addReminderBtnText: { color: Colors.white, fontWeight: '600' },
+
+   // ── Upcoming section ─────────────────────────────────────
+   section: { marginHorizontal: 16, marginBottom: 8 },
    sectionHeader: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
       marginBottom: 12,
    },
-   sectionTitle: {
-      fontSize: 18,
-      fontWeight: 'bold',
-      color: Colors.text,
+   sectionTitle: { fontSize: 17, fontWeight: 'bold', color: Colors.text },
+   seeAll: { fontSize: 13, color: Colors.primary, fontWeight: '600' },
+
+   emptyCard: {
+      backgroundColor: Colors.white,
+      borderRadius: 14,
+      padding: 24,
+      alignItems: 'center',
+      elevation: 1,
    },
-   seeAll: {
-      fontSize: 14,
-      color: Colors.primary,
-      fontWeight: '500',
-   },
+   emptyEmoji: { fontSize: 36, marginBottom: 8 },
+   emptyText: { fontSize: 14, color: Colors.textLight },
+
+   // ── Reminder card ─────────────────────────────────────────
    reminderCard: {
       backgroundColor: Colors.white,
-      borderRadius: 12,
-      padding: 14,
+      borderRadius: 14,
       marginBottom: 10,
       flexDirection: 'row',
       alignItems: 'center',
+      overflow: 'hidden',
       elevation: 2,
       shadowColor: Colors.shadow,
       shadowOffset: { width: 0, height: 1 },
       shadowOpacity: 0.1,
       shadowRadius: 4,
    },
-   reminderLeft: {
-      marginRight: 12,
-   },
-   reminderIcon: {
-      fontSize: 24,
-   },
-   reminderContent: {
-      flex: 1,
-   },
-   reminderTitle: {
-      fontSize: 15,
-      fontWeight: '600',
-      color: Colors.text,
-      marginBottom: 4,
-   },
-   reminderTime: {
-      fontSize: 12,
-      color: Colors.textLight,
-   },
-   doneBtn: {
-      fontSize: 20,
-      color: Colors.success,
-      fontWeight: 'bold',
-      paddingHorizontal: 8,
-   },
-   emptyContainer: {
-      alignItems: 'center',
-      marginTop: 40,
-   },
-   emptyEmoji: {
-      fontSize: 50,
-      marginBottom: 12,
-   },
-   emptyText: {
-      fontSize: 16,
-      fontWeight: '600',
-      color: Colors.text,
-      marginBottom: 4,
-   },
-   emptySubText: {
-      fontSize: 13,
-      color: Colors.textLight,
-   },
+   colorBar: { width: 5, alignSelf: 'stretch' },
+   colorBarActive: { backgroundColor: Colors.primary },
+   colorBarDone: { backgroundColor: Colors.success },
+   reminderInfo: { flex: 1, padding: 12 },
+   reminderTitle: { fontSize: 14, fontWeight: '600', color: Colors.text, marginBottom: 4 },
+   reminderTitleDone: { textDecorationLine: 'line-through', color: Colors.textLight },
+   reminderLocation: { fontSize: 12, color: Colors.primary, marginBottom: 2 },
+   reminderTime: { fontSize: 12, color: Colors.textLight },
+   reminderStatus: { fontSize: 20, paddingRight: 12 },
+
+   // ── FABs ──────────────────────────────────────────────────
    fab: {
       position: 'absolute',
       bottom: 24,
@@ -490,194 +696,86 @@ const styles = StyleSheet.create({
       alignItems: 'center',
       justifyContent: 'center',
       elevation: 6,
-      shadowColor: Colors.primary,
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.4,
-      shadowRadius: 8,
    },
-   fabText: {
-      fontSize: 28,
-      color: Colors.white,
-      fontWeight: '300',
+   fabText: { color: Colors.white, fontSize: 28, fontWeight: 'bold' },
+   voiceFab: {
+      position: 'absolute',
+      bottom: 90,
+      right: 24,
+      width: 50,
+      height: 50,
+      borderRadius: 25,
+      backgroundColor: Colors.secondary,
+      alignItems: 'center',
+      justifyContent: 'center',
+      elevation: 6,
    },
-   arrowIcon: {
-      fontSize: 22,
-      color: Colors.textLight,
-      fontWeight: '300',
-   },
+   voiceFabText: { fontSize: 22 },
+
+   // ── Detail Modal ──────────────────────────────────────────
    modalOverlay: {
       flex: 1,
       backgroundColor: '#00000060',
       justifyContent: 'flex-end',
    },
    modalBox: {
-      backgroundColor: Colors.background,
+      backgroundColor: Colors.white,
       borderTopLeftRadius: 24,
       borderTopRightRadius: 24,
       padding: 24,
-      maxHeight: '85%',
-   },
-   modalHeader: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      marginBottom: 12,
-   },
-   modalIcon: {
-      fontSize: 32,
-   },
-   modalClose: {
-      fontSize: 20,
-      color: Colors.textLight,
-      padding: 4,
    },
    modalTitle: {
-      fontSize: 22,
+      fontSize: 18,
       fontWeight: 'bold',
       color: Colors.text,
       marginBottom: 12,
    },
-   badgeRow: {
-      marginBottom: 16,
-   },
-   badge: {
-      alignSelf: 'flex-start',
-      paddingHorizontal: 12,
-      paddingVertical: 6,
-      borderRadius: 20,
-   },
-   badgeDone: {
-      backgroundColor: Colors.success + '20',
-   },
-   badgeDoneText: {
-      color: Colors.success,
-      fontWeight: '600',
-      fontSize: 13,
-   },
-   badgePending: {
-      backgroundColor: Colors.primary + '20',
-   },
-   badgePendingText: {
-      color: Colors.primary,
-      fontWeight: '600',
-      fontSize: 13,
-   },
-   detailsBox: {
-      backgroundColor: Colors.white,
-      borderRadius: 16,
-      padding: 16,
-      marginBottom: 16,
-   },
-   detailRow: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-      gap: 12,
-      paddingVertical: 8,
-   },
-   detailFlex: {
+   modalLocation: { fontSize: 14, color: Colors.primary, marginBottom: 6 },
+   modalDate: { fontSize: 14, color: Colors.textLight, marginBottom: 4 },
+   modalTime: { fontSize: 14, color: Colors.textLight, marginBottom: 12 },
+   modalBadgeRow: { flexDirection: 'row', marginBottom: 16 },
+   badge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
+   badgeDone: { backgroundColor: Colors.success + '20' },
+   badgeDoneText: { color: Colors.success, fontWeight: '600' },
+   badgePending: { backgroundColor: Colors.primary + '20' },
+   badgePendingText: { color: Colors.primary, fontWeight: '600' },
+   modalButtons: { flexDirection: 'row', gap: 10 },
+   doneBtn: {
       flex: 1,
-   },
-   detailDivider: {
-      height: 1,
-      backgroundColor: Colors.border,
-   },
-   detailIcon: {
-      fontSize: 20,
-      marginTop: 2,
-   },
-   detailLabel: {
-      fontSize: 12,
-      color: Colors.textLight,
-      marginBottom: 2,
-   },
-   detailValue: {
-      fontSize: 15,
-      color: Colors.text,
-      fontWeight: '500',
-   },
-   doneButton: {
       backgroundColor: Colors.success,
       borderRadius: 12,
-      paddingVertical: 14,
+      paddingVertical: 12,
       alignItems: 'center',
-      marginBottom: 10,
    },
-   doneButtonText: {
-      color: Colors.white,
-      fontSize: 16,
-      fontWeight: '600',
-   },
-   deleteButton: {
+   doneBtnText: { color: Colors.white, fontWeight: '600' },
+   deleteBtn: {
+      flex: 1,
       backgroundColor: Colors.error + '15',
       borderRadius: 12,
-      paddingVertical: 14,
+      paddingVertical: 12,
       alignItems: 'center',
       borderWidth: 1,
-      borderColor: Colors.error + '40',
+      borderColor: Colors.error + '30',
    },
-   deleteButtonText: {
-      color: Colors.error,
-      fontSize: 16,
-      fontWeight: '600',
-   },
-   profileSection: {
-      flexDirection: 'row',
+   deleteBtnText: { color: Colors.error, fontWeight: '600' },
+   closeBtn: {
+      flex: 1,
+      backgroundColor: Colors.border,
+      borderRadius: 12,
+      paddingVertical: 12,
       alignItems: 'center',
-      gap: 12,
    },
-   profileAvatar: {
-      width: 46,
-      height: 46,
-      borderRadius: 23,
-      backgroundColor: Colors.white + '30',
+   closeBtnText: { color: Colors.textLight, fontWeight: '600' },
+   editBtn: {
+      flex: 1,
+      backgroundColor: Colors.primary + '15',
+      borderRadius: 12,
+      paddingVertical: 12,
       alignItems: 'center',
-      justifyContent: 'center',
-      borderWidth: 2,
-      borderColor: Colors.white + '60',
+      borderWidth: 1,
+      borderColor: Colors.primary + '30',
    },
-   profileAvatarText: {
-      fontSize: 20,
-      fontWeight: 'bold',
-      color: Colors.white,
-   },
-   profileName: {
-      fontSize: 17,
-      fontWeight: 'bold',
-      color: Colors.white,
-   },
-   profilePhone: {
-      fontSize: 12,
-      color: Colors.white,
-      opacity: 0.8,
-      marginTop: 2,
-   },
-   greetingBadge: {
-      fontSize: 13,
-      color: Colors.white,
-      backgroundColor: Colors.white + '20',
-      paddingHorizontal: 12,
-      paddingVertical: 6,
-      borderRadius: 20,
-   },
-   voiceFab: {
-      position: 'absolute',
-      bottom: 90,
-      right: 24,
-      width: 56,
-      height: 56,
-      borderRadius: 28,
-      backgroundColor: Colors.secondary,
-      alignItems: 'center',
-      justifyContent: 'center',
-      elevation: 6,
-      shadowColor: Colors.secondary,
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.4,
-      shadowRadius: 8,
-   },
-   voiceFabText: {
-      fontSize: 24,
-   },
+   editBtnText: { color: Colors.primary, fontWeight: '600' },
 });
 
 export default HomeScreen;

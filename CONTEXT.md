@@ -1,0 +1,5 @@
+- React Native 0.76.5, WSL2 Ubuntu
+- Physical device Moto G64 via USB
+- Running: npx react-native start + npx react-native run-android
+- Known issues: Porcupine FRAME_EMITTER_KEY error (non-breaking)
+- Next task: Fix auto-stop timer bug in VoiceAssistantModal.jsx
