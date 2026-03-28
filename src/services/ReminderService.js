@@ -1,114 +1,213 @@
 import Storage from '../utils/Storage';
 import NotificationService from './NotificationService';
-
-const REMINDERS_KEY = 'reminders';
+import {
+  createReminder,
+  getAllReminders,
+  filterReminders,
+  updateReminder,
+  deleteReminder,
+  getReminder,
+} from './ApiService';
 
 const ReminderService = {
-   getAll: async () => {
-      const reminders = await Storage.get(REMINDERS_KEY);
-      return reminders || [];
-   },
 
-   getActive: async () => {
-      const reminders = await ReminderService.getAll();
-      return reminders.filter(r => !r.isDeleted);
-   },
+  // ── helper: get userId from storage ──────────
+  _getUserId: async () => {
+    const user = await Storage.get('user');
+    return user?.id || null;
+  },
 
-   add: async (reminder) => {
-      const reminders = await ReminderService.getAll();
-      const newReminder = {
-         id: Date.now().toString(),
-         title: reminder.title,
-         description: reminder.description || '',
-         location: reminder.location || '',
-         dateTime: reminder.dateTime,
-         isVoice: reminder.isVoice || false,
-         isCompleted: false,
-         isDeleted: false,
-         deletedAt: null,
-         createdAt: new Date().toISOString(),
-      };
-      reminders.push(newReminder);
-      await Storage.set(REMINDERS_KEY, reminders);
-      // In the add function, after saving:
-      await NotificationService.scheduleForReminder(newReminder);
-      return newReminder;
-   },
+  // ── map backend reminder → app format ────────
+  _map: (r) => ({
+    id: String(r.id),
+    title: r.message,
+    location: r.location || '',
+    dateTime: `${r.reminder_date}T${r.reminder_time}`,
+    type: r.reminder_type,
+    isCompleted: r.closed || false,
+    isDeleted: r.deleted || false,
+    deletedAt: r.deleted ? r.updated_at : null,
+    createdAt: r.created_at,
+    dateStatus: r.date_status,
+  }),
 
-   update: async (id, updatedData) => {
-      const reminders = await ReminderService.getAll();
-      const index = reminders.findIndex(r => r.id === id);
-      if (index !== -1) {
-         reminders[index] = { ...reminders[index], ...updatedData };
-         await Storage.set(REMINDERS_KEY, reminders);
-         return reminders[index];
-      }
-      return null;
-   },
+  // ── GET ALL (grouped from backend) ───────────
+  getAll: async () => {
+    try {
+      const userId = await ReminderService._getUserId();
+      if (!userId) return [];
+      const data = await getAllReminders(userId);
+      const groups = data.reminders || {};
+      const all = [
+        ...(groups.today    || []),
+        ...(groups.upcoming || []),
+        ...(groups.past     || []),
+        ...(groups.closed   || []),
+        ...(groups.deleted  || []),
+      ];
+      return all.map(ReminderService._map);
+    } catch (e) {
+      console.error('ReminderService.getAll error:', e.message);
+      return [];
+    }
+  },
 
-   // Soft delete — moves to deleted section
-   delete: async (id) => {
-      const reminders = await ReminderService.getAll();
-      const index = reminders.findIndex(r => r.id === id);
-      if (index !== -1) {
-         reminders[index].isDeleted = true;
-         reminders[index].deletedAt = new Date().toISOString();
-         await Storage.set(REMINDERS_KEY, reminders);
-      }
-   },
+  // ── GET ACTIVE (not deleted) ─────────────────
+  getActive: async () => {
+    try {
+      const userId = await ReminderService._getUserId();
+      if (!userId) return [];
+      const data = await filterReminders(userId, {});
+      return (data.reminders || []).map(ReminderService._map);
+    } catch (e) {
+      console.error('ReminderService.getActive error:', e.message);
+      return [];
+    }
+  },
 
-   // Permanent delete — removes forever
-   deletePermanent: async (id) => {
-      const reminders = await ReminderService.getAll();
-      const filtered = reminders.filter(r => r.id !== id);
-      await Storage.set(REMINDERS_KEY, filtered);
-   },
+  // ── GET UPCOMING ─────────────────────────────
+  getUpcoming: async () => {
+    try {
+      const userId = await ReminderService._getUserId();
+      if (!userId) return [];
+      const data = await filterReminders(userId, { filter: 'upcoming' });
+      return (data.reminders || []).map(ReminderService._map);
+    } catch (e) {
+      console.error('ReminderService.getUpcoming error:', e.message);
+      return [];
+    }
+  },
 
-   // Restore from deleted
-   restore: async (id) => {
-      return await ReminderService.update(id, {
-         isDeleted: false,
-         deletedAt: null,
+  // ── GET DELETED ──────────────────────────────
+  getDeleted: async () => {
+    try {
+      const userId = await ReminderService._getUserId();
+      if (!userId) return [];
+      const data = await filterReminders(userId, { filter: 'deleted' });
+      return (data.reminders || []).map(ReminderService._map);
+    } catch (e) {
+      console.error('ReminderService.getDeleted error:', e.message);
+      return [];
+    }
+  },
+
+  // ── ADD ──────────────────────────────────────
+  // Note: AddReminderScreen calls createReminder() directly from ApiService
+  // This is kept for any internal use
+  add: async (reminder) => {
+    try {
+      const userId = await ReminderService._getUserId();
+      if (!userId) throw new Error('Not logged in');
+      const d = new Date(reminder.dateTime);
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`;
+      const data = await createReminder({
+        user_id: userId,
+        message: reminder.title,
+        date: dateStr,
+        time: timeStr,
+        location: reminder.location || undefined,
+        type: 'ONCE',
       });
-   },
+      const mapped = ReminderService._map(data.reminder);
+      // Schedule local notification
+      await NotificationService.scheduleForReminder(mapped);
+      return mapped;
+    } catch (e) {
+      console.error('ReminderService.add error:', e.message);
+      throw e;
+    }
+  },
 
-   complete: async (id) => {
-      return await ReminderService.update(id, { isCompleted: true });
-   },
-
-   markComplete: async (id) => {
-      return await ReminderService.update(id, { isCompleted: true });
-   },
-
-   softDelete: async (id) => {
-      return await ReminderService.delete(id);
-   },
-
-   getUpcoming: async () => {
-      const reminders = await ReminderService.getAll();
-      const now = new Date();
-      // Auto complete overdue reminders
-      let updated = false;
-      for (const r of reminders) {
-         if (!r.isCompleted && !r.isDeleted && new Date(r.dateTime) < now) {
-            r.isCompleted = true;
-            updated = true;
-         }
+  // ── UPDATE ───────────────────────────────────
+  update: async (id, updatedData) => {
+    try {
+      // If marking complete or deleted — use backend
+      if (updatedData.isCompleted !== undefined || updatedData.isDeleted !== undefined) {
+        // complete and delete have their own methods — call those
+        if (updatedData.isCompleted) return await ReminderService.complete(id);
+        if (updatedData.isDeleted)   return await ReminderService.softDelete(id);
       }
-      if (updated) {
-         await Storage.set('reminders', reminders);
+      // Otherwise update fields
+      const d = updatedData.dateTime ? new Date(updatedData.dateTime) : null;
+      const payload = {};
+      if (updatedData.title)    payload.message  = updatedData.title;
+      if (updatedData.location !== undefined) payload.location = updatedData.location;
+      if (d) {
+        payload.date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        payload.time = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`;
       }
-      return reminders
-         .filter(r => !r.isCompleted && !r.isDeleted)
-         .sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
-   },
+      if (updatedData.type) payload.type = updatedData.type;
+      const data = await updateReminder(id, payload);
+      return ReminderService._map(data.reminder);
+    } catch (e) {
+      console.error('ReminderService.update error:', e.message);
+      throw e;
+    }
+  },
 
-   getDeleted: async () => {
-      const reminders = await ReminderService.getAll();
-      return reminders
-         .filter(r => r.isDeleted)
-         .sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt));
-   },
+  // ── COMPLETE ─────────────────────────────────
+  complete: async (id) => {
+    try {
+      // Backend uses PUT with closed flag — check your backend
+      // If backend has no close endpoint use update:
+      await updateReminder(id, { closed: true });
+      await NotificationService.cancelForReminder(id);
+    } catch (e) {
+      console.error('ReminderService.complete error:', e.message);
+    }
+  },
+
+  markComplete: async (id) => {
+    return await ReminderService.complete(id);
+  },
+
+  // ── SOFT DELETE ──────────────────────────────
+  delete: async (id) => {
+    try {
+      await deleteReminder(id);
+      await NotificationService.cancelForReminder(id);
+    } catch (e) {
+      console.error('ReminderService.delete error:', e.message);
+      throw e;
+    }
+  },
+
+  softDelete: async (id) => {
+    return await ReminderService.delete(id);
+  },
+
+  // ── RESTORE ──────────────────────────────────
+  restore: async (id) => {
+    try {
+      // Backend restore — PUT with deleted: false
+      const data = await updateReminder(id, { deleted: false });
+      return ReminderService._map(data.reminder);
+    } catch (e) {
+      console.error('ReminderService.restore error:', e.message);
+      throw e;
+    }
+  },
+
+  // ── PERMANENT DELETE ─────────────────────────
+  // Backend only has soft delete — permanent delete not in API docs
+  // Keeping for UI compatibility, maps to soft delete
+  deletePermanent: async (id) => {
+    return await ReminderService.delete(id);
+  },
+
+  // ── FILTER (for voice assistant / query mode) ─
+  filter: async (filters = {}) => {
+    try {
+      const userId = await ReminderService._getUserId();
+      if (!userId) return [];
+      const data = await filterReminders(userId, filters);
+      return (data.reminders || []).map(ReminderService._map);
+    } catch (e) {
+      console.error('ReminderService.filter error:', e.message);
+      return [];
+    }
+  },
 };
 
 export default ReminderService;

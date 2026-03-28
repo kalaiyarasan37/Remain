@@ -1,3 +1,4 @@
+/* 
 import {
    PermissionsAndroid,
    Platform,
@@ -112,4 +113,13 @@ const PicovoiceService = {
    },
 };
 
+*/
+
+// Empty export to prevent import errors even if commented
+const PicovoiceService = {
+    init: () => {},
+    stop: () => {},
+    pauseForVoiceInput: () => {},
+    resumeAfterVoiceInput: () => {},
+};
 export default PicovoiceService;

@@ -4,7 +4,6 @@ import {
    Text,
    StyleSheet,
    TouchableOpacity,
-   FlatList,
    StatusBar,
    Alert,
    Modal,
@@ -13,13 +12,22 @@ import {
    PermissionsAndroid,
    Platform,
    ScrollView,
+   RefreshControl,
 } from 'react-native';
+import {
+   getAllReminders,
+   updateReminder,
+   deleteReminder,
+   createReminder,
+} from '../services/ApiService';
 import Colors from '../constants/Colors';
-import ReminderService from '../services/ReminderService';
 import Storage from '../utils/Storage';
-import PicovoiceService from '../services/PicovoiceService';
+import DaVoiceService from '../services/DaVoiceService';
 import VoiceAssistantModal from '../components/VoiceAssistantModal';
-import NotificationService from '../services/NotificationService';
+
+import AIFeaturesModal from '../components/AIFeaturesModal';
+import NotificationContextModal from '../components/NotificationContextModal';
+import AIDigestModal from '../components/AIDigestModal';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = [
@@ -27,7 +35,7 @@ const MONTHS = [
    'July', 'August', 'September', 'October', 'November', 'December',
 ];
 
-const HomeScreen = ({ navigation }) => {
+const HomeScreen = ({ navigation, route }) => {
    const [showVoiceAssistant, setShowVoiceAssistant] = useState(false);
    const [upcomingReminders, setUpcomingReminders] = useState([]);
    const [allReminders, setAllReminders] = useState([]);
@@ -35,6 +43,15 @@ const HomeScreen = ({ navigation }) => {
    const [greeting, setGreeting] = useState('');
    const [selectedReminder, setSelectedReminder] = useState(null);
    const [showModal, setShowModal] = useState(false);
+   const [showAI, setShowAI] = useState(false);
+
+   // Notification Context state
+   const [contextReminder, setContextReminder] = useState(null);
+   const [showContextModal, setShowContextModal] = useState(false);
+
+   // Digest state
+   const [showDigestModal, setShowDigestModal] = useState(false);
+   const [digestType, setDigestType] = useState('daily');
 
    // Calendar state
    const today = new Date();
@@ -42,10 +59,18 @@ const HomeScreen = ({ navigation }) => {
    const [calendarYear, setCalendarYear] = useState(today.getFullYear());
    const [selectedDate, setSelectedDate] = useState(null);
    const [selectedDateReminders, setSelectedDateReminders] = useState([]);
+   const [refreshing, setRefreshing] = useState(false);
+
+   const onRefresh = React.useCallback(async () => {
+      setRefreshing(true);
+      await loadData();
+      setRefreshing(false);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, []);
 
    useEffect(() => {
+      // Remove console.log('TOKEN:') from loadData too
       loadData();
-      NotificationService.init();
       setGreetingMessage();
       const unsubscribe = navigation.addListener('focus', loadData);
 
@@ -58,39 +83,210 @@ const HomeScreen = ({ navigation }) => {
       };
       requestNotificationPermission();
 
-      PicovoiceService.init(() => {
+      // PicovoiceService.init(() => {
+      //    setShowVoiceAssistant(true);
+      // });
+      DaVoiceService.init(() => {
          setShowVoiceAssistant(true);
       });
 
       const eventEmitter = new NativeEventEmitter(NativeModules.AppForeground);
       const wakeWordSubscription = eventEmitter.addListener(
          'WAKE_WORD_DETECTED',
-         () => {
-            setShowVoiceAssistant(true);
-         },
+         () => setShowVoiceAssistant(true),
       );
+
+      const notifSubscription = NativeEventEmitter.prototype.addListener ?
+         new NativeEventEmitter().addListener('NOTIFICATION_PRESSED', (reminderId) => {
+            openNotificationContext(reminderId);
+         }) :
+         (() => {
+            const { DeviceEventEmitter } = require('react-native');
+            return DeviceEventEmitter.addListener('NOTIFICATION_PRESSED', (reminderId) => {
+               openNotificationContext(reminderId);
+            });
+         })();
 
       return () => {
          unsubscribe();
-         PicovoiceService.stop();
+         // PicovoiceService.stop();
+         DaVoiceService.stop();
          wakeWordSubscription.remove();
+         notifSubscription.remove();
       };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [navigation]);
+
+   useEffect(() => {
+      // Set digest type on mount
+      if (new Date().getDay() === 1) { // Monday
+         setDigestType('weekly');
+      } else {
+         setDigestType('daily');
+      }
+   }, []);
+
+   useEffect(() => {
+      if (route.params?.openContextId) {
+         openNotificationContext(route.params.openContextId);
+         navigation.setParams({ openContextId: undefined });
+      }
+   }, [route.params?.openContextId, navigation]);
+
+   const openNotificationContext = async (reminderId) => {
+      try {
+         const { getReminder } = require('../services/ApiService');
+         const r = await getReminder(reminderId);
+         if (r) {
+            setContextReminder({
+               id: r.id,
+               title: r.message,
+               location: r.location,
+               dateTime: `${r.reminder_date}T${r.reminder_time}`,
+            });
+            setShowContextModal(true);
+         }
+      } catch (e) {
+         console.error('Failed to load context reminder', e);
+      }
+   };
+
+   const mapReminder = (r) => ({
+      id: r.id,
+      title: r.message,
+      location: r.location,
+      dateTime: `${r.reminder_date}T${r.reminder_time}`,
+      isCompleted: r.closed,
+      isDeleted: r.deleted,
+      type: r.reminder_type,
+      dateStatus: r.date_status,
+      createdAt: r.created_at || r.updated_at,
+   });
+
+   const getEffectiveTime = (r) => {
+      if (!r || !r.dateTime) return Number.MAX_SAFE_INTEGER;
+      const d = new Date(r.dateTime);
+      if (r.type === 'DAILY') {
+         const now = new Date();
+         if (d.getTime() < now.getTime()) {
+            d.setFullYear(now.getFullYear(), now.getMonth(), now.getDate());
+         }
+      }
+      return d.getTime();
+   };
 
    const loadData = async () => {
       const userData = await Storage.get('user');
       setUser(userData);
-      const reminders = await ReminderService.getUpcoming();
-      setUpcomingReminders(reminders.slice(0, 5));
-      const all = await ReminderService.getAll();
-      setAllReminders(all.filter(r => !r.isDeleted));
+      const userId = userData?.id;
+      if (!userId) { return; }
+
+      try {
+         // Get all reminders summary
+         const data = await getAllReminders(userId);
+         const allActive = [
+            ...(data.reminders.today || []),
+            ...(data.reminders.upcoming || []),
+            ...(data.reminders.past || []),
+            ...(data.reminders.closed || []),
+         ];
+
+         // Map API fields to your existing UI fields
+         const mapped = allActive.map(r => mapReminder(r));
+
+         // Auto-complete reminders whose time has reached
+         const now = new Date();
+         let changed = false;
+         for (const r of mapped) {
+            if (r.isCompleted || r.isDeleted) continue;
+            const rTime = new Date(r.dateTime).getTime();
+            if (rTime < now.getTime()) {
+               changed = true;
+               // We perform the "Done" logic internally here
+               const isDaily = r.type === 'DAILY';
+               const todayStr = now.toISOString().split('T')[0];
+               const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+               const timeStr = r.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
+
+               try {
+                  if (isDaily) {
+                     await createReminder({
+                        user_id: userId, message: r.title, date: todayStr, time: timeStr,
+                        location: r.location, type: 'ONCE', closed: true,
+                     });
+                     await updateReminder(r.id, {
+                        message: r.title, date: nextDateStr, time: timeStr,
+                        location: r.location, type: 'DAILY', closed: false,
+                     });
+                  } else {
+                     await updateReminder(r.id, {
+                        message: r.title, date: r.dateTime.split('T')[0], time: timeStr,
+                        location: r.location, type: 'ONCE', closed: true,
+                     });
+                  }
+               } catch (e) {
+                  console.error('Auto-complete failed for', r.id, e);
+               }
+            }
+         }
+
+         if (changed) {
+            // Reload if any auto-completions happened
+            const freshData = await getAllReminders(userId);
+            const freshActive = [
+               ...(freshData.reminders.today || []),
+               ...(freshData.reminders.upcoming || []),
+               ...(freshData.reminders.past || []),
+               ...(freshData.reminders.closed || []),
+            ];
+            const freshMapped = freshActive.map(r => mapReminder(r));
+            setAllReminders(freshMapped);
+            updateLists(freshMapped);
+         } else {
+            setAllReminders(mapped);
+            updateLists(mapped);
+         }
+      } catch (err) {
+         console.error('loadData error:', err);
+      }
+   };
+
+   const updateLists = (mapped) => {
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const todayEnd = todayStart + 24 * 60 * 60 * 1000 - 1;
+
+      // Upcoming = Top 5 chronological active reminders FOR TODAY ONLY
+      const upcomingSorted = [...mapped]
+         .filter(r => {
+            if (r.isCompleted || r.isDeleted) return false;
+
+            const rDate = new Date(r.dateTime).getTime();
+            // Must be today
+            if (rDate < todayStart || rDate > todayEnd) return false;
+
+            if (r.type === 'DAILY' && getEffectiveTime(r) < now.getTime()) {
+               return false; // Auto-hide daily reminders whose time has already passed today
+            }
+            return true;
+         })
+         .sort((a, b) => {
+            const tempA = new Date(a.dateTime);
+            const tempB = new Date(b.dateTime);
+            const msA = tempA.getHours() * 3600000 + tempA.getMinutes() * 60000 + tempA.getSeconds() * 1000;
+            const msB = tempB.getHours() * 3600000 + tempB.getMinutes() * 60000 + tempB.getSeconds() * 1000;
+            return msA - msB;
+         })
+         .slice(0, 5);
+
+      setUpcomingReminders(upcomingSorted);
    };
 
    const setGreetingMessage = () => {
       const hour = new Date().getHours();
-      if (hour < 12) setGreeting('Good Morning');
-      else if (hour < 17) setGreeting('Good Afternoon');
-      else setGreeting('Good Evening');
+      if (hour < 12) { setGreeting('Good Morning'); }
+      else if (hour < 17) { setGreeting('Good Afternoon'); }
+      else { setGreeting('Good Evening'); }
    };
 
    const formatDateTime = dateTime => {
@@ -125,24 +321,110 @@ const HomeScreen = ({ navigation }) => {
       setShowModal(true);
    };
 
+   const handleMarkDoneDirect = async item => {
+      try {
+         const isDaily = item.type === 'DAILY';
+         const now = new Date();
+         const todayStr = now.toISOString().split('T')[0];
+         const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+         const timeStr = item.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
+
+         if (isDaily) {
+            // 1. Create a completed ONCE clone for today
+            await createReminder({
+               user_id: user.id || (await Storage.get('user'))?.id,
+               message: item.title,
+               date: todayStr,
+               time: timeStr,
+               location: item.location,
+               type: 'ONCE',
+               closed: true,
+            });
+
+            // 2. Move original DAILY to tomorrow
+            await updateReminder(item.id, {
+               message: item.title,
+               date: nextDateStr,
+               time: timeStr,
+               location: item.location,
+               type: 'DAILY',
+               closed: false,
+            });
+         } else {
+            await updateReminder(item.id, {
+               message: item.title,
+               date: item.dateTime.split('T')[0],
+               time: timeStr,
+               location: item.location,
+               type: 'ONCE',
+               closed: true,
+            });
+         }
+         loadData();
+      } catch (err) {
+         Alert.alert('Error', 'Could not complete reminder');
+      }
+   };
+
    const handleMarkDone = async () => {
-      if (!selectedReminder) return;
-      await ReminderService.markComplete(selectedReminder.id);
-      setShowModal(false);
-      loadData();
+      if (!selectedReminder) { return; }
+      try {
+         const isDaily = selectedReminder.type === 'DAILY'; // Defined here
+         const now = new Date();
+         const todayStr = now.toISOString().split('T')[0];
+         const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+         const timeStr = selectedReminder.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
+
+         if (isDaily) {
+            await createReminder({
+               user_id: user.id,
+               message: selectedReminder.title,
+               date: todayStr,
+               time: timeStr,
+               location: selectedReminder.location,
+               type: 'ONCE',
+               closed: true,
+            });
+            await updateReminder(selectedReminder.id, {
+               message: selectedReminder.title,
+               date: nextDateStr,
+               time: timeStr,
+               location: selectedReminder.location,
+               type: 'DAILY',
+               closed: false,
+            });
+         } else {
+            await updateReminder(selectedReminder.id, {
+               message: selectedReminder.title,
+               date: selectedReminder.dateTime.split('T')[0],
+               time: timeStr,
+               location: selectedReminder.location,
+               type: 'ONCE',
+               closed: true,
+            });
+         }
+         setShowModal(false);
+         loadData();
+      } catch (err) {
+         Alert.alert('Error', 'Could not mark as done.');
+      }
    };
 
    const handleDelete = async () => {
-      if (!selectedReminder) return;
+      if (!selectedReminder) { return; }
       Alert.alert('Delete Reminder', 'Move to deleted?', [
          { text: 'Cancel', style: 'cancel' },
          {
             text: 'Delete',
             style: 'destructive',
             onPress: async () => {
-               await ReminderService.softDelete(selectedReminder.id);
-               setShowModal(false);
-               loadData();
+               try {
+                  await deleteReminder(selectedReminder.id);
+                  setShowModal(false);
+                  loadData();
+               } catch (err) {
+                  Alert.alert('Error', 'Could not delete reminder.');
+               }
             },
          },
       ]);
@@ -153,18 +435,31 @@ const HomeScreen = ({ navigation }) => {
    const getFirstDayOfMonth = (month, year) => new Date(year, month, 1).getDay();
 
    const getRemindersForDate = (day, month, year) => {
+      const selectedTime = new Date(year, month, day).getTime();
+
       return allReminders.filter(r => {
+         // Show DAILY reminders starting from their current scheduled date
+         if (r.type === 'DAILY') {
+            const creationDate = r.createdAt ? new Date(r.createdAt) : new Date(r.dateTime);
+            const createdTimeOnly = new Date(creationDate.getFullYear(), creationDate.getMonth(), creationDate.getDate()).getTime();
+            
+            const currentRem = new Date(r.dateTime);
+            const currentRemDateOnly = new Date(currentRem.getFullYear(), currentRem.getMonth(), currentRem.getDate()).getTime();
+            
+            // It belongs to every day since creation, but if it has moved to the future, 
+            // today's view is handled by the ONCE-closed clone.
+            return selectedTime >= createdTimeOnly && selectedTime >= currentRemDateOnly;
+         }
+
+         // For ONCE reminders (whether active or completed), match exactly on their specific date
          const d = new Date(r.dateTime);
-         return (
-            d.getDate() === day &&
-            d.getMonth() === month &&
-            d.getFullYear() === year
-         );
+         const rDateOnly = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+         return rDateOnly === selectedTime;
       });
    };
 
    const hasReminder = (day, month, year) =>
-      getRemindersForDate(day, month, year).length > 0;
+      getRemindersForDate(day, month, year).filter(r => r.type === 'ONCE').length > 0;
 
    const handleDatePress = (day) => {
       const dateKey = `${calendarYear}-${calendarMonth}-${day}`;
@@ -173,9 +468,26 @@ const HomeScreen = ({ navigation }) => {
          setSelectedDateReminders([]);
       } else {
          setSelectedDate(dateKey);
-         setSelectedDateReminders(getRemindersForDate(day, calendarMonth, calendarYear));
       }
    };
+
+   useEffect(() => {
+      if (selectedDate) {
+         const [year, month, day] = selectedDate.split('-').map(Number);
+         const list = getRemindersForDate(day, month, year);
+         list.sort((a, b) => {
+            const tempA = new Date(a.dateTime);
+            const tempB = new Date(b.dateTime);
+            const msA = tempA.getHours() * 3600000 + tempA.getMinutes() * 60000 + tempA.getSeconds() * 1000;
+            const msB = tempB.getHours() * 3600000 + tempB.getMinutes() * 60000 + tempB.getSeconds() * 1000;
+            return msA - msB;
+         });
+         setSelectedDateReminders(list);
+      } else {
+         setSelectedDateReminders([]);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [allReminders, selectedDate]);
 
    const prevMonth = () => {
       if (calendarMonth === 0) {
@@ -252,7 +564,7 @@ const HomeScreen = ({ navigation }) => {
    };
 
    const getSelectedDateLabel = () => {
-      if (!selectedDate) return '';
+      if (!selectedDate) { return ''; }
       const [y, m, d] = selectedDate.split('-').map(Number);
       return new Date(y, m, d).toLocaleDateString('en-IN', {
          weekday: 'long',
@@ -260,6 +572,20 @@ const HomeScreen = ({ navigation }) => {
          month: 'long',
          year: 'numeric',
       });
+   };
+
+   const isSelectedDatePast = () => {
+      if (!selectedDate) return false;
+      const [y, m, d] = selectedDate.split('-').map(Number);
+      const selDate = new Date(y, m, d);
+      const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      return selDate.getTime() < todayStart.getTime();
+   };
+
+   const isSelectedDateToday = () => {
+      if (!selectedDate) return true; // default view is today
+      const [y, m, d] = selectedDate.split('-').map(Number);
+      return y === today.getFullYear() && m === today.getMonth() && d === today.getDate();
    };
 
    return (
@@ -281,10 +607,51 @@ const HomeScreen = ({ navigation }) => {
             </TouchableOpacity>
          </View>
 
-         <ScrollView showsVerticalScrollIndicator={false}>
+         <ScrollView 
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+               <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[Colors.primary]} />
+            }>
+
+            {/* ── Digest Notification Bubble ──────────────────── */}
+            <TouchableOpacity 
+               style={styles.digestBanner} 
+               onPress={() => setShowDigestModal(true)}
+               activeOpacity={0.8}
+            >
+               <Text style={styles.digestEmoji}>✨</Text>
+               <View style={{flex: 1}}>
+                  <Text style={styles.digestBannerTitle}>Your {digestType === 'weekly' ? 'Weekly' : 'Daily'} Digest</Text>
+                  <Text style={styles.digestBannerSub}>Tap to see your AI-generated summary</Text>
+               </View>
+               <Text style={styles.digestBannerArrow}>→</Text>
+            </TouchableOpacity>
 
             {/* ── Full Month Calendar ─────────────────────────── */}
             <View style={styles.calendarCard}>
+               {/* ── High-Fidelity Stripe Gradient ── */}
+               <View style={StyleSheet.absoluteFill}>
+                  {Array.from({ length: 40 }).map((_, i) => {
+                     const factor = i / 39;
+                     // Manual interpolation between primary (#6C63FF) and secondary (#FF6584)
+                     const r1 = 108, g1 = 99, b1 = 255; // #6C63FF
+                     const r2 = 255, g2 = 101, b2 = 132; // #FF6584
+                     const r = Math.round(r1 + factor * (r2 - r1));
+                     const g = Math.round(g1 + factor * (g2 - g1));
+                     const b = Math.round(b1 + factor * (b2 - b1));
+                     const color = `rgb(${r},${g},${b})`;
+                     return (
+                        <View
+                           key={i}
+                           style={{
+                              height: `${100 / 40}%`,
+                              backgroundColor: color,
+                           }}
+                        />
+                     );
+                  })}
+               </View>
+
                {/* Month navigation */}
                <View style={styles.calHeader}>
                   <TouchableOpacity onPress={prevMonth} style={styles.calNavBtn}>
@@ -312,9 +679,15 @@ const HomeScreen = ({ navigation }) => {
             {/* ── Selected Date Reminders ─────────────────────── */}
             {selectedDate && (
                <View style={styles.selectedSection}>
-                  <Text style={styles.selectedDateLabel}>
-                     📅 {getSelectedDateLabel()}
-                  </Text>
+                  <View style={[styles.sectionHeader, { marginBottom: 12 }]}>
+                     <Text style={[styles.selectedDateLabel, { marginBottom: 0 }]}>
+                        📅 {getSelectedDateLabel()}
+                     </Text>
+                     <TouchableOpacity
+                        onPress={() => navigation.navigate('ReminderList')}>
+                        <Text style={styles.seeAll}>See All</Text>
+                     </TouchableOpacity>
+                  </View>
 
                   {selectedDateReminders.length === 0 ? (
                      <View style={styles.noReminders}>
@@ -331,28 +704,42 @@ const HomeScreen = ({ navigation }) => {
                         </TouchableOpacity>
                      </View>
                   ) : (
-                     selectedDateReminders.map(item => (
-                        <TouchableOpacity
-                           key={item.id}
-                           style={styles.reminderCard}
-                           onPress={() => handleReminderPress(item)}>
-                           <View
+                     selectedDateReminders.map(item => {
+                        const isPast = isSelectedDatePast();
+                        const isDull = !isPast && item.isCompleted;
+
+                        return (
+                           <TouchableOpacity
+                              key={item.id}
                               style={[
-                                 styles.colorBar,
-                                 item.isCompleted
-                                    ? styles.colorBarDone
-                                    : styles.colorBarActive,
+                                 styles.reminderCard,
+                                 isDull && { opacity: 0.7 }
                               ]}
-                           />
-                           <View style={styles.reminderInfo}>
-                              <Text
+                              onPress={() => handleReminderPress(item)}>
+                              <View
                                  style={[
-                                    styles.reminderTitle,
-                                    item.isCompleted && styles.reminderTitleDone,
+                                    styles.colorBar,
+                                    isDull
+                                       ? styles.colorBarDone
+                                       : styles.colorBarActive,
                                  ]}
-                                 numberOfLines={2}>
-                                 {item.title}
-                              </Text>
+                              />
+                              <View style={styles.reminderInfo}>
+                                 <View style={styles.titleRow}>
+                                    <Text
+                                       style={[
+                                          styles.reminderTitle,
+                                          isDull && styles.reminderTitleDone,
+                                       ]}
+                                       numberOfLines={2}>
+                                    {item.title}
+                                 </Text>
+                                 {item.type === 'DAILY' && (
+                                    <View style={styles.dailyBadge}>
+                                       <Text style={styles.dailyBadgeText}>DAILY</Text>
+                                    </View>
+                                 )}
+                              </View>
                               {item.location ? (
                                  <Text style={styles.reminderLocation}>
                                     📍 {item.location}
@@ -362,56 +749,71 @@ const HomeScreen = ({ navigation }) => {
                                  🕐 {formatDateTime(item.dateTime)}
                               </Text>
                            </View>
-                           <Text style={styles.reminderStatus}>
-                              {item.isCompleted ? '✅' : '🔔'}
-                           </Text>
+                           <TouchableOpacity onPress={() => handleMarkDoneDirect(item)} hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
+                              <Text style={styles.reminderStatus}>
+                                 {item.isCompleted ? '✅' : '🔔'}
+                              </Text>
+                           </TouchableOpacity>
+                        </TouchableOpacity>
+                        );
+                     })
+                  )}
+               </View>
+            )}
+
+            {/* ── Upcoming Reminders ──────────────────────────── */}
+            {isSelectedDateToday() && (
+               <View style={styles.section}>
+                  <View style={styles.sectionHeader}>
+                     <Text style={styles.sectionTitle}>Upcoming Reminders</Text>
+                     <TouchableOpacity
+                        onPress={() => navigation.navigate('ReminderList')}>
+                        <Text style={styles.seeAll}>See All</Text>
+                     </TouchableOpacity>
+                  </View>
+
+                  {upcomingReminders.length === 0 ? (
+                     <View style={styles.emptyCard}>
+                        <Text style={styles.emptyEmoji}>🎉</Text>
+                        <Text style={styles.emptyText}>No upcoming reminders!</Text>
+                     </View>
+                  ) : (
+                     upcomingReminders.map(item => (
+                        <TouchableOpacity
+                           key={item.id}
+                           style={styles.reminderCard}
+                           onPress={() => handleReminderPress(item)}>
+                           <View style={[styles.colorBar, styles.colorBarActive]} />
+                           <View style={styles.reminderInfo}>
+                              <View style={styles.titleRow}>
+                                 <Text style={styles.reminderTitle} numberOfLines={2}>
+                                    {item.title}
+                                 </Text>
+                                 {item.type === 'DAILY' && (
+                                    <View style={styles.dailyBadge}>
+                                       <Text style={styles.dailyBadgeText}>DAILY</Text>
+                                    </View>
+                                 )}
+                              </View>
+                              {item.location ? (
+                                 <Text style={styles.reminderLocation}>
+                                    📍 {item.location}
+                                 </Text>
+                              ) : null}
+                              <Text style={styles.reminderTime}>
+                                 🕐 {formatDateTime(item.dateTime)}
+                              </Text>
+                           </View>
+                           <TouchableOpacity onPress={() => handleMarkDoneDirect(item)} hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
+                              <Text style={styles.reminderStatus}>🔔</Text>
+                           </TouchableOpacity>
                         </TouchableOpacity>
                      ))
                   )}
                </View>
             )}
 
-            {/* ── Upcoming Reminders ──────────────────────────── */}
-            <View style={styles.section}>
-               <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionTitle}>Upcoming Reminders</Text>
-                  <TouchableOpacity
-                     onPress={() => navigation.navigate('ReminderList')}>
-                     <Text style={styles.seeAll}>See All</Text>
-                  </TouchableOpacity>
-               </View>
-
-               {upcomingReminders.length === 0 ? (
-                  <View style={styles.emptyCard}>
-                     <Text style={styles.emptyEmoji}>🎉</Text>
-                     <Text style={styles.emptyText}>No upcoming reminders!</Text>
-                  </View>
-               ) : (
-                  upcomingReminders.map(item => (
-                     <TouchableOpacity
-                        key={item.id}
-                        style={styles.reminderCard}
-                        onPress={() => handleReminderPress(item)}>
-                        <View style={[styles.colorBar, styles.colorBarActive]} />
-                        <View style={styles.reminderInfo}>
-                           <Text style={styles.reminderTitle} numberOfLines={2}>
-                              {item.title}
-                           </Text>
-                           {item.location ? (
-                              <Text style={styles.reminderLocation}>
-                                 📍 {item.location}
-                              </Text>
-                           ) : null}
-                           <Text style={styles.reminderTime}>
-                              🕐 {formatDateTime(item.dateTime)}
-                           </Text>
-                        </View>
-                        <Text style={styles.reminderStatus}>🔔</Text>
-                     </TouchableOpacity>
-                  ))
-               )}
-            </View>
-
+            {/* eslint-disable-next-line react-native/no-inline-styles */}
             <View style={{ height: 100 }} />
          </ScrollView>
 
@@ -427,6 +829,33 @@ const HomeScreen = ({ navigation }) => {
             style={styles.voiceFab}
             onPress={() => setShowVoiceAssistant(true)}>
             <Text style={styles.voiceFabText}>🎤</Text>
+         </TouchableOpacity>
+
+         {/* AI FAB */}
+         <TouchableOpacity
+            style={styles.aiFab}
+            onPress={() => setShowAI(true)}>
+            <View style={StyleSheet.absoluteFill}>
+               {Array.from({ length: 15 }).map((_, i) => {
+                  const factor = i / 14;
+                  const r1 = 108, g1 = 99, b1 = 255; // #6C63FF
+                  const r2 = 255, g2 = 101, b2 = 132; // #FF6584
+                  const r = Math.round(r1 + factor * (r2 - r1));
+                  const g = Math.round(g1 + factor * (g2 - g1));
+                  const b = Math.round(b1 + factor * (b2 - b1));
+                  const color = `rgb(${r},${g},${b})`;
+                  return (
+                     <View
+                        key={i}
+                        style={{
+                           height: `${100 / 15}%`,
+                           backgroundColor: color,
+                        }}
+                     />
+                  );
+               })}
+            </View>
+            <Text style={styles.aiFabText}>🤖</Text>
          </TouchableOpacity>
 
          {/* Reminder Detail Modal */}
@@ -515,6 +944,38 @@ const HomeScreen = ({ navigation }) => {
                }, 300);
             }}
          />
+
+         <AIFeaturesModal
+            visible={showAI}
+            onClose={() => setShowAI(false)}
+            onAddSuggestion={(suggestion) => {
+               navigation.navigate('AddReminder', {
+                  prefillData: {
+                     message: suggestion.title,
+                     date: suggestion.suggestedDate,
+                     time: suggestion.suggestedTime,
+                     location: null,
+                  },
+               });
+            }}
+            navigation={navigation}
+         />
+
+         <NotificationContextModal
+            visible={showContextModal}
+            onClose={() => setShowContextModal(false)}
+            reminder={contextReminder}
+         />
+
+         <AIDigestModal
+            visible={showDigestModal}
+            onClose={() => setShowDigestModal(false)}
+            onNavigate={(filter) => {
+               setShowDigestModal(false);
+               navigation.navigate('ReminderList', { filter });
+            }}
+            type={digestType}
+         />
       </View>
    );
 };
@@ -544,15 +1005,15 @@ const styles = StyleSheet.create({
 
    // ── Calendar ────────────────────────────────────────────
    calendarCard: {
-      backgroundColor: Colors.white,
       margin: 16,
       borderRadius: 16,
       padding: 16,
-      elevation: 3,
-      shadowColor: Colors.shadow,
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.1,
-      shadowRadius: 8,
+      elevation: 8,
+      shadowColor: Colors.primary,
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.4,
+      shadowRadius: 12,
+      overflow: 'hidden', // Required for the absoluteFill gradient background
    },
    calHeader: {
       flexDirection: 'row',
@@ -564,12 +1025,12 @@ const styles = StyleSheet.create({
       width: 36,
       height: 36,
       borderRadius: 18,
-      backgroundColor: Colors.primary + '15',
+      backgroundColor: Colors.white + '20',
       alignItems: 'center',
       justifyContent: 'center',
    },
-   calNavText: { fontSize: 22, color: Colors.primary, fontWeight: 'bold' },
-   calMonthTitle: { fontSize: 17, fontWeight: 'bold', color: Colors.text },
+   calNavText: { fontSize: 22, color: Colors.white, fontWeight: 'bold' },
+   calMonthTitle: { fontSize: 17, fontWeight: 'bold', color: Colors.white, letterSpacing: 1 },
    calDayLabels: {
       flexDirection: 'row',
       marginBottom: 6,
@@ -577,9 +1038,12 @@ const styles = StyleSheet.create({
    calDayLabel: {
       flex: 1,
       textAlign: 'center',
-      fontSize: 12,
-      color: Colors.textLight,
-      fontWeight: '600',
+      fontSize: 10,
+      color: Colors.white,
+      fontWeight: 'bold',
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+      opacity: 0.9,
    },
    calGrid: {
       flexDirection: 'row',
@@ -592,24 +1056,41 @@ const styles = StyleSheet.create({
       justifyContent: 'center',
    },
    calCellToday: {
-      backgroundColor: Colors.primary + '20',
+      backgroundColor: Colors.white,
       borderRadius: 20,
+      elevation: 4,
+      shadowColor: Colors.black,
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.3,
+      shadowRadius: 3,
    },
    calCellSelected: {
-      backgroundColor: Colors.primary,
+      backgroundColor: Colors.white,
       borderRadius: 20,
+      elevation: 3,
+      shadowColor: Colors.black,
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.2,
+      shadowRadius: 2,
    },
-   calCellText: { fontSize: 13, color: Colors.text },
+   calCellText: { 
+      fontSize: 14, 
+      color: Colors.white,
+      fontWeight: '500',
+      textShadowColor: 'rgba(0,0,0,0.2)',
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 2,
+   },
    calCellTodayText: { color: Colors.primary, fontWeight: 'bold' },
-   calCellSelectedText: { color: Colors.white, fontWeight: 'bold' },
+   calCellSelectedText: { color: Colors.primary, fontWeight: 'bold' },
    calDot: {
       width: 5,
       height: 5,
       borderRadius: 3,
-      backgroundColor: Colors.primary,
+      backgroundColor: Colors.white + '70',
       marginTop: 2,
    },
-   calDotSelected: { backgroundColor: Colors.white },
+   calDotSelected: { backgroundColor: Colors.primary },
 
    // ── Selected date section ────────────────────────────────
    selectedSection: {
@@ -678,8 +1159,9 @@ const styles = StyleSheet.create({
    colorBarActive: { backgroundColor: Colors.primary },
    colorBarDone: { backgroundColor: Colors.success },
    reminderInfo: { flex: 1, padding: 12 },
-   reminderTitle: { fontSize: 14, fontWeight: '600', color: Colors.text, marginBottom: 4 },
-   reminderTitleDone: { textDecorationLine: 'line-through', color: Colors.textLight },
+   titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+   reminderTitle: { flex: 1, fontSize: 14, fontWeight: '600', color: Colors.text, marginBottom: 4, marginRight: 8 },
+   reminderTitleDone: { color: Colors.textLight },
    reminderLocation: { fontSize: 12, color: Colors.primary, marginBottom: 2 },
    reminderTime: { fontSize: 12, color: Colors.textLight },
    reminderStatus: { fontSize: 20, paddingRight: 12 },
@@ -776,6 +1258,66 @@ const styles = StyleSheet.create({
       borderColor: Colors.primary + '30',
    },
    editBtnText: { color: Colors.primary, fontWeight: '600' },
+   aiFab: {
+      position: 'absolute',
+      bottom: 156,
+      right: 24,
+      width: 50,
+      height: 50,
+      borderRadius: 25,
+      alignItems: 'center',
+      justifyContent: 'center',
+      elevation: 6,
+      overflow: 'hidden',
+   },
+   aiFabText: { fontSize: 22 },
+   digestBanner: {
+      marginHorizontal: 16,
+      marginTop: 16,
+      backgroundColor: Colors.white,
+      borderRadius: 16,
+      padding: 16,
+      flexDirection: 'row',
+      alignItems: 'center',
+      elevation: 4,
+      shadowColor: Colors.primary,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.15,
+      shadowRadius: 8,
+      borderWidth: 1,
+      borderColor: Colors.primary + '20',
+   },
+   digestEmoji: {
+      fontSize: 28,
+      marginRight: 12,
+   },
+   digestBannerTitle: {
+      fontSize: 16,
+      fontWeight: 'bold',
+      color: Colors.primary,
+      marginBottom: 2,
+   },
+   digestBannerSub: {
+      fontSize: 13,
+      color: Colors.textLight,
+   },
+   digestBannerArrow: {
+      fontSize: 20,
+      color: Colors.primary,
+      fontWeight: 'bold',
+   },
+   dailyBadge: {
+      backgroundColor: Colors.success + '20',
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      marginLeft: 4,
+   },
+   dailyBadgeText: {
+      color: Colors.success,
+      fontSize: 10,
+      fontWeight: 'bold',
+   },
 });
 
 export default HomeScreen;

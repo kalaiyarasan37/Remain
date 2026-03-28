@@ -10,11 +10,17 @@ import {
    Modal,
 } from 'react-native';
 import Colors from '../constants/Colors';
-import ReminderService from '../services/ReminderService';
+import Storage from '../utils/Storage';
+import {
+   filterReminders,
+   deleteReminder,
+   updateReminder,
+   getAllReminders,
+} from '../services/ApiService';
 
-const FILTERS = ['all', 'upcoming', 'completed', 'deleted'];
+const FILTERS = ['all', 'upcoming', 'completed', 'daily', 'deleted'];
 
-const ReminderListScreen = ({ navigation }) => {
+const ReminderListScreen = ({ navigation, route }) => {
    const [reminders, setReminders] = useState([]);
    const [filter, setFilter] = useState('all');
    const [selectedReminder, setSelectedReminder] = useState(null);
@@ -26,19 +32,95 @@ const ReminderListScreen = ({ navigation }) => {
       return unsubscribe;
    }, [navigation]);
 
+   useEffect(() => {
+      if (route?.params?.filter) {
+         setFilter(route.params.filter);
+         navigation.setParams({ filter: undefined });
+      }
+   }, [route?.params?.filter, navigation]);
+
+   const mapReminder = (r) => ({
+      id: r.id,
+      title: r.message || '',
+      location: r.location || '',
+      dateTime: r.reminder_date && r.reminder_time
+         ? `${r.reminder_date}T${r.reminder_time}`
+         : null,
+      isCompleted: r.closed || false,
+      isDeleted: r.deleted || false,
+      type: r.reminder_type || 'ONCE',
+      dateStatus: r.date_status || '',
+      isVoice: false,
+      deletedAt: r.updated_at || null,
+      createdAt: r.created_at || null,
+   });
+
+   function getEffectiveTime(r) {
+      if (!r || !r.dateTime) return Number.MAX_SAFE_INTEGER;
+      const d = new Date(r.dateTime);
+      if (r.type === 'DAILY') {
+         const now = new Date();
+         if (d.getTime() < now.getTime()) {
+            d.setFullYear(now.getFullYear(), now.getMonth(), now.getDate());
+         }
+      }
+      return d.getTime();
+   }
+
    const loadReminders = async () => {
-      const all = await ReminderService.getAll();
-      setReminders(all.reverse());
+      const userData = await Storage.get('user');
+      const userId = userData?.id;
+      if (!userId) return;
+
+      try {
+         const data = await getAllReminders(userId);
+         const all = [
+            ...(data.reminders.today || []),
+            ...(data.reminders.upcoming || []),
+            ...(data.reminders.past || []),
+            ...(data.reminders.closed || []),
+            ...(data.reminders.deleted || []),
+         ].map(r => mapReminder(r));
+         
+         // 1. Active: Not completed, Not deleted. Sorted soonest first (ascending)
+         const active = all
+            .filter(r => !r.isCompleted && !r.isDeleted)
+            .sort((a, b) => getEffectiveTime(a) - getEffectiveTime(b));
+            
+         // 2. Completed: Done items. Sorted most recently completed first (descending)
+         const completed = all
+            .filter(r => r.isCompleted && !r.isDeleted)
+            .sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+            
+         // 3. Deleted: Sorted most recent first
+         const deleted = all
+            .filter(r => r.isDeleted)
+            .sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+
+         setReminders([...active, ...completed, ...deleted]);
+      } catch (err) {
+         console.error('loadReminders error:', err);
+      }
    };
 
    const getFilteredReminders = () => {
       switch (filter) {
          case 'upcoming':
-            return reminders.filter(
-               r => !r.isDeleted && !r.isCompleted && new Date(r.dateTime) > new Date(),
-            );
+            return reminders.filter(r => {
+               if (r.isDeleted || r.isCompleted) return false;
+               if (r.type === 'DAILY') {
+                  // For DAILY, if today's effective time has passed, it is essentially "done" for today
+                  // and will re-trigger tomorrow, so it isn't strictly "Upcoming" anymore today.
+                  return getEffectiveTime(r) >= new Date().getTime();
+               }
+               // For ONCE, we only show it in Upcoming if it is strictly future. (Though users might want overdue ONCE tasks to remain visible somewhere).
+               // Usually, purely "upcoming" implies time > now.
+               return getEffectiveTime(r) >= new Date().getTime();
+            });
          case 'completed':
             return reminders.filter(r => !r.isDeleted && r.isCompleted);
+         case 'daily':
+            return reminders.filter(r => !r.isDeleted && r.type === 'DAILY' && !r.isCompleted);
          case 'deleted':
             return reminders.filter(r => r.isDeleted);
          default:
@@ -56,8 +138,12 @@ const ReminderListScreen = ({ navigation }) => {
                text: 'Delete',
                style: 'destructive',
                onPress: async () => {
-                  await ReminderService.delete(id);
-                  loadReminders();
+                  try {
+                     await deleteReminder(id);
+                     loadReminders();
+                  } catch (err) {
+                     Alert.alert('Error', 'Could not delete reminder.');
+                  }
                },
             },
          ],
@@ -67,15 +153,19 @@ const ReminderListScreen = ({ navigation }) => {
    const handlePermanentDelete = (id) => {
       Alert.alert(
          'Delete Forever',
-         'This will permanently delete the reminder. This cannot be undone.',
+         'This will permanently delete the reminder.',
          [
             { text: 'Cancel', style: 'cancel' },
             {
                text: 'Delete Forever',
                style: 'destructive',
                onPress: async () => {
-                  await ReminderService.deletePermanent(id);
-                  loadReminders();
+                  try {
+                     await deleteReminder(id);
+                     loadReminders();
+                  } catch (err) {
+                     Alert.alert('Error', 'Could not delete reminder.');
+                  }
                },
             },
          ],
@@ -106,9 +196,23 @@ const ReminderListScreen = ({ navigation }) => {
 
    const handleMarkDoneFromModal = async () => {
       if (!selectedReminder) return;
-      await ReminderService.markComplete(selectedReminder.id);
-      setShowModal(false);
-      loadReminders();
+      try {
+         const isDaily = selectedReminder.type === 'DAILY';
+         const nextDateStr = new Date(new Date().getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+         await updateReminder(selectedReminder.id, {
+            message: selectedReminder.title,
+            date: isDaily ? nextDateStr : selectedReminder.dateTime.split('T')[0],
+            time: selectedReminder.dateTime.split('T')[1]?.substring(0, 8),
+            location: selectedReminder.location,
+            type: selectedReminder.type || 'ONCE',
+            closed: !isDaily,
+         });
+         setShowModal(false);
+         loadReminders();
+      } catch (err) {
+         Alert.alert('Error', 'Could not mark as done.');
+      }
    };
 
    const handleDeleteFromModal = () => {
@@ -118,23 +222,59 @@ const ReminderListScreen = ({ navigation }) => {
             text: 'Delete',
             style: 'destructive',
             onPress: async () => {
-               await ReminderService.delete(selectedReminder.id);
-               setShowModal(false);
-               loadReminders();
+               try {
+                  await deleteReminder(selectedReminder.id);
+                  setShowModal(false);
+                  loadReminders();
+               } catch (err) {
+                  Alert.alert('Error', 'Could not delete reminder.');
+               }
             },
          },
       ]);
    };
 
    const handleRestore = async (id) => {
-      await ReminderService.restore(id);
-      loadReminders();
-      Alert.alert('Restored', 'Reminder has been restored successfully!');
+      const reminder = reminders.find(r => r.id === id);
+      if (!reminder) return;
+      try {
+         await updateReminder(id, {
+            message: reminder.title,
+            date: reminder.dateTime
+               ? reminder.dateTime.split('T')[0]
+               : new Date().toISOString().split('T')[0],
+            time: reminder.dateTime
+               ? reminder.dateTime.split('T')[1]?.substring(0, 8)
+               : '07:00:00',
+            location: reminder.location || undefined,
+            type: reminder.type || 'ONCE',
+         });
+         loadReminders();
+         Alert.alert('Restored', 'Reminder has been restored successfully!');
+      } catch (err) {
+         Alert.alert('Error', 'Could not restore reminder.');
+      }
    };
 
    const handleComplete = async (id) => {
-      await ReminderService.complete(id);
-      loadReminders();
+      const reminder = reminders.find(r => r.id === id);
+      if (!reminder) return;
+      try {
+         const isDaily = reminder.type === 'DAILY';
+         const nextDateStr = new Date(new Date().getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+         await updateReminder(id, {
+            message: reminder.title,
+            date: isDaily ? nextDateStr : reminder.dateTime.split('T')[0],
+            time: reminder.dateTime.split('T')[1]?.substring(0, 8),
+            location: reminder.location,
+            type: reminder.type || 'ONCE',
+            closed: !isDaily,
+         });
+         loadReminders();
+      } catch (err) {
+         Alert.alert('Error', 'Could not complete reminder.');
+      }
    };
 
    const handleClearAllDeleted = () => {
@@ -147,11 +287,15 @@ const ReminderListScreen = ({ navigation }) => {
                text: 'Clear All',
                style: 'destructive',
                onPress: async () => {
-                  const deleted = await ReminderService.getDeleted();
-                  for (const r of deleted) {
-                     await ReminderService.deletePermanent(r.id);
+                  try {
+                     const deleted = reminders.filter(r => r.isDeleted);
+                     for (const r of deleted) {
+                        await deleteReminder(r.id);
+                     }
+                     loadReminders();
+                  } catch (err) {
+                     Alert.alert('Error', 'Could not clear deleted reminders.');
                   }
-                  loadReminders();
                },
             },
          ],
@@ -159,7 +303,9 @@ const ReminderListScreen = ({ navigation }) => {
    };
 
    const formatDateTime = (dateTime) => {
+      if (!dateTime) return 'No date';
       const date = new Date(dateTime);
+      if (isNaN(date.getTime())) return 'Invalid date';
       return date.toLocaleString('en-IN', {
          day: '2-digit',
          month: 'short',
@@ -174,6 +320,7 @@ const ReminderListScreen = ({ navigation }) => {
          case 'all': return 'All';
          case 'upcoming': return '🔔 Soon';
          case 'completed': return '✓ Done';
+         case 'daily': return '🔄 Daily';
          case 'deleted': return '🗑 Deleted';
          default: return f;
       }
@@ -181,13 +328,15 @@ const ReminderListScreen = ({ navigation }) => {
 
    const renderItem = ({ item }) => {
       const isDeletedItem = item.isDeleted;
+      const shouldLookDull = filter === 'all' && (item.isCompleted || isDeletedItem);
 
       return (
          <TouchableOpacity
             style={[
                styles.card,
-               item.isCompleted && !isDeletedItem && styles.cardCompleted,
-               isDeletedItem && styles.cardDeleted,
+               shouldLookDull && item.isCompleted && !isDeletedItem && styles.cardCompleted,
+               shouldLookDull && isDeletedItem && styles.cardDeleted,
+               !shouldLookDull && isDeletedItem && { backgroundColor: '#f9f9f9', opacity: 1 },
             ]}
             onPress={() => handleReminderPress(item)}
             activeOpacity={0.8}>
@@ -207,14 +356,21 @@ const ReminderListScreen = ({ navigation }) => {
             <View style={styles.cardContent}>
                <View style={styles.cardHeader}>
                   <Text style={styles.cardIcon}>{item.isVoice ? '🎤' : '✏️'}</Text>
-                  <Text
-                     style={[
-                        styles.cardTitle,
-                        (item.isCompleted || isDeletedItem) && styles.textCompleted,
-                     ]}
-                     numberOfLines={1}>
-                     {item.title}
-                  </Text>
+                  <View style={styles.titleRow}>
+                     <Text
+                        style={[
+                           styles.cardTitle,
+                           shouldLookDull && styles.textCompleted,
+                        ]}
+                        numberOfLines={1}>
+                        {item.title}
+                     </Text>
+                     {item.type === 'DAILY' && !isDeletedItem && !item.isCompleted && (
+                        <View style={styles.dailyBadge}>
+                           <Text style={styles.dailyBadgeText}>DAILY</Text>
+                        </View>
+                     )}
+                  </View>
                   {item.isCompleted && !isDeletedItem && (
                      <Text style={styles.completedBadge}>✓ Done</Text>
                   )}
@@ -229,8 +385,10 @@ const ReminderListScreen = ({ navigation }) => {
 
                <Text style={styles.cardTime}>
                   {isDeletedItem
-                     ? '🗑 Deleted: ' + formatDateTime(item.deletedAt)
-                     : '📅 ' + formatDateTime(item.dateTime)}
+                     ? '🗑 Deleted: ' + (item.deletedAt ? formatDateTime(item.deletedAt) : 'Unknown')
+                     : filter === 'daily' && item.createdAt
+                        ? '📅 Created: ' + formatDateTime(item.createdAt)
+                        : '📅 ' + (item.dateTime ? formatDateTime(item.dateTime) : 'No date')}
                </Text>
 
                {/* Actions for normal reminders */}
@@ -337,16 +495,18 @@ const ReminderListScreen = ({ navigation }) => {
          {filteredReminders.length === 0 ? (
             <View style={styles.emptyContainer}>
                <Text style={styles.emptyEmoji}>
-                  {filter === 'deleted' ? '🗑' : filter === 'completed' ? '✅' : '📭'}
+                  {filter === 'deleted' ? '🗑' : filter === 'completed' ? '✅' : filter === 'daily' ? '🔄' : '📭'}
                </Text>
                <Text style={styles.emptyText}>
                   {filter === 'deleted'
                      ? 'No deleted reminders'
                      : filter === 'completed'
                         ? 'No completed reminders'
-                        : filter === 'upcoming'
-                           ? 'No upcoming reminders'
-                           : 'No reminders found'}
+                        : filter === 'daily'
+                           ? 'No daily reminders'
+                           : filter === 'upcoming'
+                              ? 'No upcoming reminders'
+                              : 'No reminders found'}
                </Text>
                {filter !== 'deleted' && filter !== 'completed' && (
                   <TouchableOpacity
@@ -361,7 +521,7 @@ const ReminderListScreen = ({ navigation }) => {
          ) : (
             <FlatList
                data={filteredReminders}
-               keyExtractor={item => item.id}
+               keyExtractor={item => String(item.id)}
                renderItem={renderItem}
                contentContainerStyle={styles.list}
                showsVerticalScrollIndicator={false}
@@ -582,8 +742,25 @@ const styles = StyleSheet.create({
       fontWeight: '600',
       color: Colors.text,
    },
+   titleRow: {
+      flex: 1,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+   },
+   dailyBadge: {
+      backgroundColor: Colors.success + '15',
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      marginLeft: 6,
+   },
+   dailyBadgeText: {
+      color: Colors.success,
+      fontSize: 9,
+      fontWeight: 'bold',
+   },
    textCompleted: {
-      textDecorationLine: 'line-through',
       color: Colors.textLight,
    },
    completedBadge: {
@@ -770,15 +947,15 @@ const styles = StyleSheet.create({
       fontWeight: '600',
    },
    modalEditBtn: {
-   flex: 1,
-   backgroundColor: Colors.primary + '15',
-   borderRadius: 12,
-   paddingVertical: 12,
-   alignItems: 'center',
-   borderWidth: 1,
-   borderColor: Colors.primary + '30',
-},
-modalEditBtnText: {color: Colors.primary, fontWeight: '600'},
+      flex: 1,
+      backgroundColor: Colors.primary + '15',
+      borderRadius: 12,
+      paddingVertical: 12,
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: Colors.primary + '30',
+   },
+   modalEditBtnText: { color: Colors.primary, fontWeight: '600' },
 });
 
 export default ReminderListScreen;

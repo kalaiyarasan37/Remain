@@ -1,7 +1,7 @@
 buildscript {
     ext {
         buildToolsVersion = "35.0.0"
-        minSdkVersion = 24
+        minSdkVersion = 26
         compileSdkVersion = 35
         targetSdkVersion = 34
         ndkVersion = "26.1.10909125"
@@ -19,3 +19,14 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+
+allprojects {
+    repositories {
+        // maven {
+        //     // react-native-wakeword (DaVoice wake word detection)
+        //     url("${project(':react-native-wakeword').projectDir}/libs")
+        // }
+        google()
+        mavenCentral()
+    }
+}

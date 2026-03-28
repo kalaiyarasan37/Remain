@@ -12,8 +12,9 @@
   "dependencies": {
     "@notifee/react-native": "^9.1.8",
     "@picovoice/porcupine-react-native": "^4.0.0",
-    "@picovoice/react-native-voice-processor": "^1.2.3",
     "@react-native-async-storage/async-storage": "^1.23.1",
+    "@react-native-clipboard/clipboard": "^1.16.3",
+    "@react-native-community/geolocation": "^3.4.0",
     "@react-native-voice/voice": "^3.2.4",
     "@react-navigation/native": "^7.1.34",
     "@react-navigation/stack": "^7.8.6",
@@ -26,7 +27,8 @@
     "react-native-gesture-handler": "^2.30.0",
     "react-native-safe-area-context": "^5.7.0",
     "react-native-screens": "^3.35.0",
-    "react-native-tts": "^4.1.1"
+    "react-native-tts": "^4.1.1",
+    "react-native-webview": "^13.16.1"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

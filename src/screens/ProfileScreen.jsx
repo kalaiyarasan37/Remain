@@ -33,10 +33,19 @@ const ProfileScreen = ({ navigation }) => {
       return;
     }
     const updated = { ...user, name: name.trim() };
-    await Storage.set('user', updated);
-    setUser(updated);
-    setIsEditing(false);
-    Alert.alert('Saved', 'Your name has been updated successfully!');
+    
+    try {
+      const { updateProfile } = require('../services/ApiService');
+      await updateProfile({ name: updated.name, mobile: updated.phone });
+      
+      await Storage.set('user', updated);
+      setUser(updated);
+      setIsEditing(false);
+      Alert.alert('Saved', 'Your name has been updated successfully!');
+    } catch (err) {
+      console.error(err);
+      Alert.alert('Error', 'Failed to update name on server. Please try again.');
+    }
   };
 
   const handleLogout = () => {

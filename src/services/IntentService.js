@@ -1,9 +1,9 @@
 import Config from '../constants/Config';
 import Storage from '../utils/Storage';
+import { filterReminders } from '../services/ApiService';
 
 const IntentService = {
 
-  // Determine intent from transcribed text
   getIntent: async (text) => {
     const today = new Date();
     const todayStr = today.toISOString().split('T')[0];
@@ -32,7 +32,7 @@ If user wants to QUERY reminders:
 
 Query type rules:
 - "show all reminders" or "show my reminders" → query_type: "all"
-- "upcoming reminders" or "what's next" → query_type: "upcoming"  
+- "upcoming reminders" or "what's next" → query_type: "upcoming"
 - "completed reminders" or "done reminders" → query_type: "completed"
 - "reminders at [place]" or "reminders in [place]" → query_type: "by_location"
 - "tomorrow's reminders" or "today's reminders" → query_type: "by_date"
@@ -57,7 +57,8 @@ Tamil/Thanglish hints:
 - "iravu" = night
 - "show pannunga" or "kaatu" = show/query
 
-Return ONLY JSON. No explanation. No markdown. No backticks.`;
+Return ONLY JSON. No explanation. No markdown. No backticks.
+CRITICAL: Output ONLY the JSON object. Start with { end with }. Zero other text.`;
 
     const response = await fetch(Config.GROQ_API_URL, {
       method: 'POST',
@@ -66,7 +67,7 @@ Return ONLY JSON. No explanation. No markdown. No backticks.`;
         Authorization: `Bearer ${Config.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: Config.GROQ_MODEL,
+        model: Config.GROQ_MODEL_JSON,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         max_tokens: 300,
@@ -74,86 +75,86 @@ Return ONLY JSON. No explanation. No markdown. No backticks.`;
     });
 
     const data = await response.json();
-
-    if (data.error) {
-      throw new Error(data.error.message);
-    }
+    if (data.error) throw new Error(data.error.message);
 
     const content = data.choices[0].message.content.trim();
+    console.log('Intent raw response:', content);
     const cleaned = content
       .replace(/```json/g, '')
       .replace(/```/g, '')
       .trim();
 
-    return JSON.parse(cleaned);
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON found in response');
+    return JSON.parse(jsonMatch[0]);
   },
 
-  // Query reminders based on intent filters
+  // ── Now calls backend API instead of local storage ──
   queryReminders: async (intent) => {
-    const REMINDERS_KEY = 'reminders';
-    const all = await Storage.get(REMINDERS_KEY) || [];
-    const active = all.filter(r => !r.isDeleted);
-    const now = new Date();
+    const userData = await Storage.get('user');
+    const userId = userData?.id;
+    if (!userId) return [];
 
-    let results = [];
+    try {
+      let filters = {};
 
-    switch (intent.query_type) {
-      case 'all':
-        results = active;
-        break;
+      switch (intent.query_type) {
+        case 'all':
+          filters = {};
+          break;
 
-      case 'upcoming':
-        results = active.filter(
-          r => !r.isCompleted && new Date(r.dateTime) > now,
-        ).sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
-        break;
+        case 'upcoming':
+          filters = { filter: 'upcoming' };
+          break;
 
-      case 'completed':
-        results = active.filter(r => r.isCompleted);
-        break;
+        case 'completed':
+          filters = { filter: 'closed' };
+          break;
 
-      case 'by_location':
-        if (intent.location) {
-          results = active.filter(
-            r =>
-              r.location &&
-              r.location.toLowerCase().includes(intent.location.toLowerCase()),
-          );
-        }
-        break;
+        case 'by_location':
+          if (intent.location) {
+            filters = { location: intent.location };
+          }
+          break;
 
-      case 'by_date':
-        if (intent.date) {
-          results = active.filter(r => {
-            const reminderDate = new Date(r.dateTime)
-              .toISOString()
-              .split('T')[0];
-            return reminderDate === intent.date;
-          });
-        }
-        break;
+        case 'by_date':
+          if (intent.date) {
+            filters = { date_from: intent.date, date_to: intent.date };
+          }
+          break;
 
-      case 'by_time':
-        if (intent.time) {
-          const [filterHour] = intent.time.split(':').map(Number);
-          results = active.filter(r => {
-            const reminderHour = new Date(r.dateTime).getHours();
-            // Match within 3 hour window
-            return Math.abs(reminderHour - filterHour) <= 3;
-          });
-        }
-        break;
+        case 'by_time':
+          if (intent.time) {
+            filters = { time: intent.time };
+          }
+          break;
 
-      default:
-        results = active.filter(
-          r => !r.isCompleted && new Date(r.dateTime) > now,
-        );
+        default:
+          filters = { filter: 'upcoming' };
+      }
+
+      const data = await filterReminders(userId, filters);
+
+      // Map API fields to shape generateSummary expects
+      return (data.reminders || []).map(r => ({
+        id: r.id,
+        title: r.message || '',
+        location: r.location || '',
+        dateTime: r.reminder_date && r.reminder_time
+          ? `${r.reminder_date}T${r.reminder_time}`
+          : null,
+        isCompleted: r.closed || false,
+        isDeleted: r.deleted || false,
+        type: r.reminder_type || 'ONCE',
+      }));
+
+    } catch (err) {
+      console.error('queryReminders error:', err);
+      return [];
     }
-
-    return results;
   },
 
-  // Generate AI summary of query results
+  // generateSummary unchanged — works with mapped data
   generateSummary: async (results, summaryRequest) => {
     if (results.length === 0) {
       return `No reminders found for "${summaryRequest}".`;
@@ -162,18 +163,20 @@ Return ONLY JSON. No explanation. No markdown. No backticks.`;
     const remindersList = results.slice(0, 10).map(r => ({
       message: r.title,
       location: r.location || 'No location',
-      dateTime: new Date(r.dateTime).toLocaleString('en-IN', {
-        day: '2-digit',
-        month: 'short',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true,
-      }),
+      dateTime: r.dateTime
+        ? new Date(r.dateTime).toLocaleString('en-IN', {
+            day: '2-digit',
+            month: 'short',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+          })
+        : 'No date',
       status: r.isCompleted ? 'completed' : 'pending',
     }));
 
-    const prompt = `You are a helpful reminder assistant. 
-    
+    const prompt = `You are a helpful reminder assistant.
+
 User asked: "${summaryRequest}"
 
 Found ${results.length} reminder(s):
@@ -191,7 +194,7 @@ If Tamil/Thanglish was used in the request, respond in simple English.`;
         Authorization: `Bearer ${Config.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: Config.GROQ_MODEL,
+        model: Config.GROQ_MODEL_JSON,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
         max_tokens: 150,
@@ -199,7 +202,6 @@ If Tamil/Thanglish was used in the request, respond in simple English.`;
     });
 
     const data = await response.json();
-
     if (data.error || !data.choices) {
       return `Found ${results.length} reminder(s) matching your request.`;
     }

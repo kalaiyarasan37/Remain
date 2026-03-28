@@ -143,7 +143,9 @@ Time rules:
 - "afternoon" or "madhiyam" = 14:00
 - "night" or "iravu" = 21:00
 
-Return ONLY the JSON. No explanation. No markdown. No backticks.
+CRITICAL: Your ENTIRE response must be ONLY the JSON object. 
+Start your response with { and end with }
+No thinking. No explanation. No markdown. No text before or after JSON.
 Example: {"message":"Meeting at office","location":"office","date":"2026-03-20","time":"15:00"}`;
 
       try {
@@ -154,7 +156,7 @@ Example: {"message":"Meeting at office","location":"office","date":"2026-03-20",
                Authorization: `Bearer ${Config.GROQ_API_KEY}`,
             },
             body: JSON.stringify({
-               model: Config.GROQ_MODEL,
+               model: Config.GROQ_MODEL_JSON,
                messages: [{ role: 'user', content: prompt }],
                temperature: 0.1,
                max_tokens: 200,

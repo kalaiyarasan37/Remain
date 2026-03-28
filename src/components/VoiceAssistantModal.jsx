@@ -14,7 +14,7 @@ import {
 import Colors from '../constants/Colors';
 import VoiceService from '../services/VoiceService';
 import IntentService from '../services/IntentService';
-import PicovoiceService from '../services/PicovoiceService';
+import DaVoiceService from '../services/DaVoiceService';
 
 const STATES = {
    LISTENING: 'listening',
@@ -47,13 +47,15 @@ const VoiceAssistantModal = ({
 
    useEffect(() => {
       if (visible) {
-         // Pause porcupine while modal is open
-         PicovoiceService.pauseForVoiceInput();
+         // Pause wake word while modal is open
+         // PicovoiceService.pauseForVoiceInput();
+         DaVoiceService.pause();
          startListening();
       } else {
          cleanup();
-         // Resume porcupine after modal closes
-         PicovoiceService.resumeAfterVoiceInput();
+         // Resume wake word after modal closes
+         // PicovoiceService.resumeAfterVoiceInput();
+         DaVoiceService.resume();
       }
       return () => cleanup();
    }, [visible]);
@@ -343,7 +345,7 @@ const VoiceAssistantModal = ({
                   {results.length > 0 ? (
                      <FlatList
                         data={results}
-                        keyExtractor={item => item.id}
+                        keyExtractor={item => String(item.id)}
                         renderItem={renderReminder}
                         scrollEnabled={false}
                      />
@@ -388,7 +390,7 @@ const VoiceAssistantModal = ({
             <View style={styles.container}>
                <View style={styles.header}>
                   <Text style={styles.headerTitle}>
-                     {triggeredByWakeWord ? '🎤 Hey RemainApp!' : '🎤 Voice Assistant'}
+                     {triggeredByWakeWord ? '🎤 Hey DaVoice!' : '🎤 Voice Assistant'}
                   </Text>
                   <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
                      <Text style={styles.closeBtnText}>✕</Text>
