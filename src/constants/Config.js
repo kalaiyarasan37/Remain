@@ -16,7 +16,7 @@ const Config = {
   GROQ_MODEL_FAST: 'openai/gpt-oss-20b',
 
   // For JSON parsing (intent, priority, duplicate, voice parse)
-  GROQ_MODEL_JSON: 'llama-3.3-70b-versatile',
+  GROQ_MODEL_JSON: 'llama-3.1-8b-instant',
 
   DAVOICE_LICENSE_KEY: 'MTc3NzU4MjgwMDAwMA==-DjFidRwm0IRAGfH/z5nbjGYCrKtm0Q+sc2LNoexBnm8=',
   

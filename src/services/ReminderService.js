@@ -38,14 +38,15 @@ const ReminderService = {
       if (!userId) return [];
       const data = await getAllReminders(userId);
       const groups = data.reminders || {};
-      const all = [
+      const allRaw = [
         ...(groups.today    || []),
         ...(groups.upcoming || []),
         ...(groups.past     || []),
         ...(groups.closed   || []),
         ...(groups.deleted  || []),
       ];
-      return all.map(ReminderService._map);
+      const uniqueReminders = Array.from(new Map(allRaw.map(item => [item.id, item])).values());
+      return uniqueReminders.map(ReminderService._map);
     } catch (e) {
       console.error('ReminderService.getAll error:', e.message);
       return [];
@@ -149,9 +150,16 @@ const ReminderService = {
   // ── COMPLETE ─────────────────────────────────
   complete: async (id) => {
     try {
-      // Backend uses PUT with closed flag — check your backend
-      // If backend has no close endpoint use update:
-      await updateReminder(id, { closed: true });
+      const data = await getReminder(id);
+      const reminder = data.reminder || data;
+      await updateReminder(id, {
+        message: reminder.message,
+        date: reminder.reminder_date,
+        time: reminder.reminder_time,
+        location: reminder.location || undefined,
+        type: reminder.reminder_type || 'ONCE',
+        closed: true,
+      });
       await NotificationService.cancelForReminder(id);
     } catch (e) {
       console.error('ReminderService.complete error:', e.message);

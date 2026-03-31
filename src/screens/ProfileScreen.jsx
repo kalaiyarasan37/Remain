@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,20 +11,102 @@ import {
 } from 'react-native';
 import Colors from '../constants/Colors';
 import Storage from '../utils/Storage';
+import DocumentPicker from 'react-native-document-picker';
+import RNFS from 'react-native-fs';
+import Sound from 'react-native-sound';
+
+Sound.setCategory('Playback');
+
+const DEFAULT_SOUNDS = [
+  { id: 'alarm.ogg', label: 'Default Alarm', type: 'bundled' },
+  { id: 'chime.ogg', label: 'Space Chime', type: 'bundled' },
+  { id: 'beep.ogg', label: 'Short Beep', type: 'bundled' },
+];
 
 const ProfileScreen = ({ navigation }) => {
   const [user, setUser] = useState(null);
   const [name, setName] = useState('');
   const [isEditing, setIsEditing] = useState(false);
+  const [aiConfirmSetting, setAiConfirmSetting] = useState('ask_every_time');
+  const [alarmSound, setAlarmSound] = useState('alarm.ogg');
+  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
+  const previewSound = useRef(null);
 
   useEffect(() => {
     loadUser();
+    return () => {
+      if (previewSound.current) {
+        previewSound.current.stop();
+        previewSound.current.release();
+      }
+    };
   }, []);
 
   const loadUser = async () => {
     const userData = await Storage.get('user');
     setUser(userData);
     setName(userData?.name || '');
+    // Load AI confirmation preference
+    const aiSetting = await Storage.get('ai_confirm_setting');
+    setAiConfirmSetting(aiSetting || 'ask_every_time');
+    
+    // Load Alarm Sound preference
+    const savedSound = await Storage.get('alarm_sound');
+    if (savedSound) {
+      setAlarmSound(savedSound);
+    }
+  };
+
+  const handleSelectSound = async (soundId, type) => {
+    setAlarmSound(soundId);
+    await Storage.set('alarm_sound', soundId);
+    playPreview(soundId, type);
+  };
+
+  const playPreview = (soundId, type) => {
+    if (previewSound.current) {
+      previewSound.current.stop();
+      previewSound.current.release();
+      previewSound.current = null;
+      setIsPlayingPreview(false);
+    }
+    
+    // Bundled sounds use MAIN_BUNDLE base path, custom files use absolute path (base path = '')
+    const basePath = type === 'bundled' ? Sound.MAIN_BUNDLE : '';
+    
+    previewSound.current = new Sound(soundId, basePath, (error) => {
+      if (error) {
+        console.log('failed to load preview', error);
+        Alert.alert('Playback Error', 'Could not play the selected audio file.');
+        return;
+      }
+      setIsPlayingPreview(true);
+      previewSound.current.play((success) => {
+        setIsPlayingPreview(false);
+      });
+    });
+  };
+
+  const handleCustomUpload = async () => {
+    try {
+      const res = await DocumentPicker.pickSingle({
+        type: [DocumentPicker.types.audio],
+      });
+      
+      const fileName = `custom_alarm_${Date.now()}_${res.name.replace(/[^a-zA-Z0-9.\-_]/g, '')}`;
+      const destPath = `${RNFS.DocumentDirectoryPath}/${fileName}`;
+      
+      await RNFS.copyFile(res.uri, destPath);
+      handleSelectSound(destPath, 'custom');
+      
+    } catch (err) {
+      if (DocumentPicker.isCancel(err)) {
+        // user cancelled
+      } else {
+        console.error('File pick error:', err);
+        Alert.alert('Upload Failed', 'There was an issue selecting the audio file.');
+      }
+    }
   };
 
   const handleSave = async () => {
@@ -139,6 +221,154 @@ const ProfileScreen = ({ navigation }) => {
               <Text style={styles.lockedText}>🔒 Fixed</Text>
             </View>
           </View>
+        </View>
+
+        {/* AI Settings Card */}
+        <View style={[styles.card, { marginTop: 16 }]}>
+          <Text style={styles.cardTitle}>AI Assistant Settings</Text>
+
+          <Text style={styles.aiSettingLabel}>
+            🤖 When AI updates or deletes a reminder:
+          </Text>
+
+          <TouchableOpacity
+            style={[
+              styles.aiOption,
+              aiConfirmSetting === 'ask_every_time' && styles.aiOptionActive,
+            ]}
+            onPress={async () => {
+              setAiConfirmSetting('ask_every_time');
+              await Storage.set('ai_confirm_setting', 'ask_every_time');
+            }}
+          >
+            <View style={styles.aiOptionRadio}>
+              {aiConfirmSetting === 'ask_every_time' && (
+                <View style={styles.aiOptionRadioFill} />
+              )}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[
+                styles.aiOptionTitle,
+                aiConfirmSetting === 'ask_every_time' && styles.aiOptionTitleActive,
+              ]}>🔐 Ask every time</Text>
+              <Text style={styles.aiOptionDesc}>
+                AI will ask for confirmation before modifying reminders
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.aiOption,
+              aiConfirmSetting === 'no_confirm' && styles.aiOptionActive,
+            ]}
+            onPress={async () => {
+              setAiConfirmSetting('no_confirm');
+              await Storage.set('ai_confirm_setting', 'no_confirm');
+            }}
+          >
+            <View style={styles.aiOptionRadio}>
+              {aiConfirmSetting === 'no_confirm' && (
+                <View style={styles.aiOptionRadioFill} />
+              )}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[
+                styles.aiOptionTitle,
+                aiConfirmSetting === 'no_confirm' && styles.aiOptionTitleActive,
+              ]}>⚡ Execute without asking</Text>
+              <Text style={styles.aiOptionDesc}>
+                AI will update/delete reminders immediately without confirmation
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        {/* Alarm Settings Card */}
+        <View style={[styles.card, { marginTop: 16 }]}>
+          <Text style={styles.cardTitle}>Alarm Sound Options</Text>
+
+          <Text style={styles.aiSettingLabel}>
+            🎵 Select the sound to play for notifications:
+          </Text>
+
+          {DEFAULT_SOUNDS.map((sound) => (
+             <TouchableOpacity
+               key={sound.id}
+               style={[
+                 styles.aiOption,
+                 alarmSound === sound.id && styles.aiOptionActive,
+               ]}
+               onPress={() => handleSelectSound(sound.id, sound.type)}
+             >
+               <View style={styles.aiOptionRadio}>
+                 {alarmSound === sound.id && (
+                   <View style={styles.aiOptionRadioFill} />
+                 )}
+               </View>
+               <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                 <Text style={[
+                   styles.aiOptionTitle,
+                   { marginBottom: 0 },
+                   alarmSound === sound.id && styles.aiOptionTitleActive,
+                 ]}>{sound.label}</Text>
+                 {(alarmSound === sound.id && isPlayingPreview) && (
+                   <Text style={{ fontSize: 10, color: Colors.primary }}>🔊 Playing...</Text>
+                 )}
+               </View>
+             </TouchableOpacity>
+          ))}
+          
+          <View
+            style={[
+              styles.aiOption,
+              alarmSound.includes(RNFS.DocumentDirectoryPath) && styles.aiOptionActive,
+              { flexDirection: 'column', alignItems: 'stretch' }
+            ]}
+          >
+            <TouchableOpacity 
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}
+              onPress={() => {
+                if (alarmSound.includes(RNFS.DocumentDirectoryPath)) {
+                   handleSelectSound(alarmSound, 'custom');
+                } else {
+                   handleCustomUpload();
+                }
+              }}
+            >
+              <View style={styles.aiOptionRadio}>
+                {alarmSound.includes(RNFS.DocumentDirectoryPath) && (
+                  <View style={styles.aiOptionRadioFill} />
+                )}
+              </View>
+              <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={[
+                    styles.aiOptionTitle,
+                    { marginBottom: 0 },
+                    alarmSound.includes(RNFS.DocumentDirectoryPath) && styles.aiOptionTitleActive,
+                  ]}>📁 Custom Sound</Text>
+                  {alarmSound.includes(RNFS.DocumentDirectoryPath) && (
+                    <Text style={styles.aiOptionDesc} numberOfLines={1}>
+                      {alarmSound.split('/').pop()}
+                    </Text>
+                  )}
+                </View>
+                {(alarmSound.includes(RNFS.DocumentDirectoryPath) && isPlayingPreview) && (
+                  <Text style={{ fontSize: 10, color: Colors.primary }}>🔊 Playing...</Text>
+                )}
+              </View>
+            </TouchableOpacity>
+            
+            {alarmSound.includes(RNFS.DocumentDirectoryPath) && (
+              <TouchableOpacity 
+                style={{ marginTop: 10, marginLeft: 34, alignSelf: 'flex-start' }} 
+                onPress={handleCustomUpload}>
+                <Text style={{ color: Colors.primary, fontSize: 13, fontWeight: '700' }}>📤 Upload Different File</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
         </View>
 
         {/* Logout Button */}
@@ -297,6 +527,55 @@ const styles = StyleSheet.create({
     color: Colors.white,
     fontSize: 16,
     fontWeight: '600',
+  },
+  aiSettingLabel: {
+    fontSize: 14,
+    color: Colors.text,
+    marginBottom: 12,
+    lineHeight: 20,
+  },
+  aiOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: Colors.border,
+    marginBottom: 10,
+    gap: 12,
+  },
+  aiOptionActive: {
+    borderColor: Colors.primary,
+    backgroundColor: Colors.primary + '08',
+  },
+  aiOptionRadio: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: Colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiOptionRadioFill: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: Colors.primary,
+  },
+  aiOptionTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: Colors.text,
+    marginBottom: 2,
+  },
+  aiOptionTitleActive: {
+    color: Colors.primary,
+  },
+  aiOptionDesc: {
+    fontSize: 12,
+    color: Colors.textLight,
+    lineHeight: 16,
   },
 });
 

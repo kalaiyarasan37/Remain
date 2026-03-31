@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { ToastAndroid } from 'react-native';
+import { ToastAndroid, DeviceEventEmitter } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import notifee, { EventType } from '@notifee/react-native';
@@ -11,6 +11,8 @@ import HomeScreen from '../screens/HomeScreen';
 import AddReminderScreen from '../screens/AddReminderScreen';
 import ReminderListScreen from '../screens/ReminderListScreen';
 import ProfileScreen from '../screens/ProfileScreen';
+import VoiceAssistantScreen from '../screens/VoiceAssistantScreen';
+import AlarmScreen from '../screens/AlarmScreen';
 import Storage from '../utils/Storage';
 
 const Stack = createStackNavigator();
@@ -74,7 +76,17 @@ const AppNavigator = () => {
     }
   });
 
-  return () => unsubscribe();
+  const subShowAlarm = DeviceEventEmitter.addListener('SHOW_ALARM', (notification) => {
+    // Only show AlarmScreen for actual reminders — NOT OTP notifications
+    if (notification?.data?.otp) return;
+    if (!notification?.data?.reminderId) return;
+    navigationRef.current?.navigate('Alarm', { notification });
+  });
+
+  return () => {
+    unsubscribe();
+    subShowAlarm.remove();
+  };
 }, []);
 
    return (
@@ -87,9 +99,11 @@ const AppNavigator = () => {
             <Stack.Screen name="AddReminder" component={AddReminderScreen} />
             <Stack.Screen name="ReminderList" component={ReminderListScreen} />
             <Stack.Screen name="Profile" component={ProfileScreen} />
+            <Stack.Screen name="VoiceAssistant" component={VoiceAssistantScreen} />
+            <Stack.Screen name="Alarm" component={AlarmScreen} />
          </Stack.Navigator>
       </NavigationContainer>
    );
 };
 
-export default AppNavigator;
+export default AppNavigator;

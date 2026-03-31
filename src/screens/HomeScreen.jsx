@@ -23,7 +23,6 @@ import {
 import Colors from '../constants/Colors';
 import Storage from '../utils/Storage';
 import DaVoiceService from '../services/DaVoiceService';
-import VoiceAssistantModal from '../components/VoiceAssistantModal';
 
 import AIFeaturesModal from '../components/AIFeaturesModal';
 import NotificationContextModal from '../components/NotificationContextModal';
@@ -36,7 +35,7 @@ const MONTHS = [
 ];
 
 const HomeScreen = ({ navigation, route }) => {
-   const [showVoiceAssistant, setShowVoiceAssistant] = useState(false);
+
    const [upcomingReminders, setUpcomingReminders] = useState([]);
    const [allReminders, setAllReminders] = useState([]);
    const [user, setUser] = useState(null);
@@ -87,13 +86,13 @@ const HomeScreen = ({ navigation, route }) => {
       //    setShowVoiceAssistant(true);
       // });
       DaVoiceService.init(() => {
-         setShowVoiceAssistant(true);
+         navigation.navigate('VoiceAssistant', { autoListen: true });
       });
 
       const eventEmitter = new NativeEventEmitter(NativeModules.AppForeground);
       const wakeWordSubscription = eventEmitter.addListener(
          'WAKE_WORD_DETECTED',
-         () => setShowVoiceAssistant(true),
+         () => navigation.navigate('VoiceAssistant', { autoListen: true }),
       );
 
       const notifSubscription = NativeEventEmitter.prototype.addListener ?
@@ -184,15 +183,16 @@ const HomeScreen = ({ navigation, route }) => {
       try {
          // Get all reminders summary
          const data = await getAllReminders(userId);
-         const allActive = [
+         const allActiveRaw = [
             ...(data.reminders.today || []),
             ...(data.reminders.upcoming || []),
             ...(data.reminders.past || []),
             ...(data.reminders.closed || []),
          ];
+         const uniqueActive = Array.from(new Map(allActiveRaw.map(item => [item.id, item])).values());
 
          // Map API fields to your existing UI fields
-         const mapped = allActive.map(r => mapReminder(r));
+         const mapped = uniqueActive.map(r => mapReminder(r));
 
          // Auto-complete reminders whose time has reached
          const now = new Date();
@@ -210,36 +210,55 @@ const HomeScreen = ({ navigation, route }) => {
 
                try {
                   if (isDaily) {
-                     await createReminder({
-                        user_id: userId, message: r.title, date: todayStr, time: timeStr,
-                        location: r.location, type: 'ONCE', closed: true,
-                     });
+                     // Only create a closed clone if the time hasn't already passed TODAY
+                     // (backend rejects creating ONCE reminders with a past datetime)
+                     const cloneDateTime = new Date(`${todayStr}T${timeStr}`);
+                     if (cloneDateTime.getTime() > now.getTime() - 60000) {
+                        // within 1-min grace — still create clone
+                        const newRem = await createReminder({
+                           user_id: userId, message: r.title, date: todayStr, time: timeStr,
+                           location: r.location, type: 'ONCE'
+                        });
+                        if (newRem && newRem.reminder && newRem.reminder.id) {
+                           await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+                        }
+                     }
+                     // Always move DAILY reminder forward to tomorrow
                      await updateReminder(r.id, {
                         message: r.title, date: nextDateStr, time: timeStr,
                         location: r.location, type: 'DAILY', closed: false,
                      });
                   } else {
-                     await updateReminder(r.id, {
-                        message: r.title, date: r.dateTime.split('T')[0], time: timeStr,
-                        location: r.location, type: 'ONCE', closed: true,
-                     });
+                     // Use ReminderService.complete() — it fetches the reminder fresh
+                     // from backend first, so all required fields (message, date, time, type)
+                     // are sent correctly without relying on potentially stale local values
+                     const ReminderService = require('../services/ReminderService').default;
+                     await ReminderService.complete(r.id);
                   }
                } catch (e) {
-                  console.error('Auto-complete failed for', r.id, e);
+                  console.warn('Auto-complete skipped for', r.id, e.message);
                }
             }
+         }
+
+         // ── ONE-TIME CLEANUP: Delete stray ACTIVE ONCE clones that share names with Daily tags ──
+         const dailyTitles = new Set(mapped.filter(m => m.type === 'DAILY').map(m => m.title));
+         const strayOnces = mapped.filter(m => m.type === 'ONCE' && !m.isCompleted && !m.isDeleted && dailyTitles.has(m.title));
+         for (const stray of strayOnces) {
+             try { await deleteReminder(stray.id); changed = true; } catch(e) {}
          }
 
          if (changed) {
             // Reload if any auto-completions happened
             const freshData = await getAllReminders(userId);
-            const freshActive = [
+            const freshActiveRaw = [
                ...(freshData.reminders.today || []),
                ...(freshData.reminders.upcoming || []),
                ...(freshData.reminders.past || []),
                ...(freshData.reminders.closed || []),
             ];
-            const freshMapped = freshActive.map(r => mapReminder(r));
+            const uniqueFreshActive = Array.from(new Map(freshActiveRaw.map(item => [item.id, item])).values());
+            const freshMapped = uniqueFreshActive.map(r => mapReminder(r));
             setAllReminders(freshMapped);
             updateLists(freshMapped);
          } else {
@@ -331,15 +350,17 @@ const HomeScreen = ({ navigation, route }) => {
 
          if (isDaily) {
             // 1. Create a completed ONCE clone for today
-            await createReminder({
+            const newRem = await createReminder({
                user_id: user.id || (await Storage.get('user'))?.id,
                message: item.title,
                date: todayStr,
                time: timeStr,
                location: item.location,
-               type: 'ONCE',
-               closed: true,
+               type: 'ONCE'
             });
+            if (newRem?.reminder?.id) {
+               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+            }
 
             // 2. Move original DAILY to tomorrow
             await updateReminder(item.id, {
@@ -376,15 +397,17 @@ const HomeScreen = ({ navigation, route }) => {
          const timeStr = selectedReminder.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
 
          if (isDaily) {
-            await createReminder({
+            const newRem = await createReminder({
                user_id: user.id,
                message: selectedReminder.title,
                date: todayStr,
                time: timeStr,
                location: selectedReminder.location,
-               type: 'ONCE',
-               closed: true,
+               type: 'ONCE'
             });
+            if (newRem?.reminder?.id) {
+               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+            }
             await updateReminder(selectedReminder.id, {
                message: selectedReminder.title,
                date: nextDateStr,
@@ -827,7 +850,7 @@ const HomeScreen = ({ navigation, route }) => {
          {/* Voice FAB */}
          <TouchableOpacity
             style={styles.voiceFab}
-            onPress={() => setShowVoiceAssistant(true)}>
+            onPress={() => navigation.navigate('VoiceAssistant', { autoListen: true })}>
             <Text style={styles.voiceFabText}>🎤</Text>
          </TouchableOpacity>
 
@@ -929,21 +952,7 @@ const HomeScreen = ({ navigation, route }) => {
             </View>
          </Modal>
 
-         {/* Voice Assistant Modal */}
-         <VoiceAssistantModal
-            visible={showVoiceAssistant}
-            onClose={() => setShowVoiceAssistant(false)}
-            triggeredByWakeWord={true}
-            onAddReminder={intent => {
-               setShowVoiceAssistant(false);
-               setTimeout(() => {
-                  navigation.navigate('AddReminder', {
-                     isVoice: true,
-                     prefillData: intent,
-                  });
-               }, 300);
-            }}
-         />
+
 
          <AIFeaturesModal
             visible={showAI}

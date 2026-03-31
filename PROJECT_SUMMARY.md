@@ -1,5 +1,5 @@
 # RemainApp — Complete Project Summary
-**Last Updated: March 26, 2026**
+**Last Updated: March 30, 2026**
 **Development Environment: WSL2 Ubuntu 22.04 on Windows**
 
 ---
@@ -28,18 +28,22 @@ RemainApp/
 │   │   ├── HomeScreen.jsx            ← Calendar, upcoming, AI FAB, voice FAB
 │   │   ├── AddReminderScreen.jsx     ← Add/Edit, voice input, duplicate check
 │   │   ├── ReminderListScreen.jsx    ← All/Upcoming/Completed/Deleted tabs
-│   │   └── ProfileScreen.jsx        ← Edit name, logout
+│   │   ├── ProfileScreen.jsx         ← Edit name, logout
+│   │   └── VoiceAssistantScreen.jsx  ← Full-screen chat interface for AI assistant
 │   ├── services/
 │   │   ├── ReminderService.js        ← CRUD, auto-complete, markComplete, softDelete
 │   │   ├── VoiceService.js           ← Record → Whisper → Llama JSON parse
 │   │   ├── IntentService.js          ← Query intent parsing (add vs query)
-│   │   ├── PicovoiceService.js       ← Wake word, pause/resume around recording
+│   │   ├── ApiService.js             ← Backend REST API endpoints
+│   │   ├── DaVoiceService.js         ← DaVoice wake word service stub
 │   │   ├── NotificationService.js    ← Schedule/cancel via notifee
 │   │   ├── AIService.js              ← Briefing, suggestions, priority, duplicate
-│   │   └── AppForegroundService.js  ← JS wrapper for native foreground module
+│   │   └── AppForegroundService.js   ← JS wrapper for native foreground module
 │   ├── components/
-│   │   ├── VoiceAssistantModal.jsx   ← Listening UI, silence detection, results
-│   │   └── AIFeaturesModal.jsx      ← Briefing/Suggestions/Priority tabs
+│   │   ├── VoiceAssistantModal.jsx   ← Listening UI (legacy/fallback)
+│   │   ├── AIFeaturesModal.jsx       ← Briefing/Suggestions/Priority tabs
+│   │   ├── NotificationContextModal.jsx ← Deep-linked context modal with AI details
+│   │   └── LocationPickerModal.jsx   ← Map-based location selection
 │   ├── constants/
 │   │   ├── Config.js                 ← API keys, model names, Picovoice key
 │   │   └── Colors.js                 ← primary:#6C63FF, secondary:#FF6584...
@@ -82,11 +86,13 @@ RemainApp/
 - Tool recommendation: icon.kitchen (padding=0, dark background)
 
 ### 3. Reminder Management
-- Add reminder: message, location, custom date/time picker modals
+- Add reminder: message, location, map-based location picker modals
 - **Edit reminder**: pre-filled form with Update button
 - Soft delete → Deleted section with restore option
 - Permanent delete with confirmation
-- Auto-complete when reminder time passes (no overdue concept)
+- **Automated completion**: Tasks are automatically completed once their scheduled time has passed
+- **Daily Reminders Cloning**: A cloning mechanism for recurrences to preserve history rather than overwriting in place
+- **Upcoming Reminders**: Filtered exclusively to show tasks scheduled for the current day
 - Reminder detail modal: mark done, edit, delete, close
 
 ### 4. Calendar View (HomeScreen)
@@ -105,7 +111,9 @@ RemainApp/
 - **Silence detection**: Audio level monitoring, auto-stop after 1.5s silence
 - Threshold: `db < -14` (calibrated for Moto G64)
 
-### 6. Voice Assistant (Query Mode)
+### 6. Voice Assistant (Full Page Chat & Query Mode)
+- **Full-Page Chat Interface** (`VoiceAssistantScreen`) with interactive inline reminder cards
+- Quick-reply buttons for confirmation flows and minimal redundant text output
 - "Show reminders at office" → filters by location
 - "What's tomorrow's schedule?" → filters by date
 - "Show upcoming reminders" → sorted upcoming list
@@ -113,11 +121,10 @@ RemainApp/
 - AI generates natural language summary of results
 - "Ask Again" button in results
 
-### 7. Wake Word Detection (DISABLED FOR NOW)
-- **Current Status**: Disabled to prevent build/runtime errors during development.
-- **Previous Implementation**: Picovoice Porcupine v4 ("Hey RemainApp")
-- **Attempted Migration**: DaVoice `react-native-wakeword` ("Need Help Now" trial)
-- **Next Steps**: Awaiting correct license/model configuration. The service file `DaVoiceService.js` currently exports a safe stub to prevent crashes. Pending future implementation.
+### 7. Wake Word Detection (DaVoice Migration)
+- **Current Status**: Successfully handled and mitigated Metro bundler crashes resulting from legacy dependencies.
+- **Previous Implementation**: Picovoice Porcupine v4 logic cleanly decoupled or stubbed.
+- **Current Implementation**: App cleanly runs with `DaVoiceService.js` wake-word functionality ready/stubbed.
 
 ### 8. Notifications (via @notifee/react-native)
 - Scheduled at exact reminder time
@@ -136,12 +143,13 @@ RemainApp/
 - **Duplicate Detection**: Warns before saving similar reminder (on save)
 - All accessible via 🤖 FAB on HomeScreen
 
-### 10. Advanced AI Context Suite
+### 10. Advanced AI Context Suite & UX Polishes
 - **Smart Repeat Suggestions**: Real-time analysis of the last 7 days; auto-prompts to convert repetitive tasks to `DAILY`.
 - **Smart Location Chips**: Filters historical locations with AI fuzzy matching for 1-tap fast auto-fill during text entry.
-- **Reminder Conflict Detector**: Backend API validation blocks overlapping schedules within ±120 mins with an override alert.
+- **Reminder Conflict Detector**: Advanced AI-driven conflict detection explicitly differentiating between generic message similarity and true time overlaps (±120 mins).
 - **Daily & Weekly AI Digests**: Dedicated HomeScreen notification banner that calculates completion stats and fetches a highly personalized, motivational summary from the Groq API.
-- **Notification Context Linking**: (Previously Built) Deep-links unread reminders to AI analysis modals for traffic/weather considerations upon tapping the notification bubble.
+- **Notification Context Linking**: Highly functional deep-linking. Tapping a notification opens the Home screen and immediately presents a contextual modal leveraging AI for real-time, location-aware suggestions (e.g., traffic or weather).
+- **Styling Refinements**: Applied bespoke UI elements like custom gradient backgrounds to the AI Assistant Action Button for consistent presentation.
 
 ---
 
@@ -307,7 +315,6 @@ set GRADLE_USER_HOME=C:\GradleHome
   isDeleted: boolean,
   deletedAt: string | null,
   createdAt: ISO string,
-  snoozeCount: number,    // for smart snooze
 }
 ```
 
@@ -316,7 +323,6 @@ set GRADLE_USER_HOME=C:\GradleHome
 {
   name: string,
   phone: string,
-  countryCode: '+91',
   isLoggedIn: true,
 }
 ```

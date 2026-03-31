@@ -4,7 +4,7 @@ import { filterReminders } from '../services/ApiService';
 
 const IntentService = {
 
-  getIntent: async (text) => {
+  getIntent: async (text, chatHistory = []) => {
     const today = new Date();
     const todayStr = today.toISOString().split('T')[0];
     const timeStr = today.toLocaleTimeString('en-IN', {
@@ -13,22 +13,37 @@ const IntentService = {
       hour12: false,
     });
 
-    const prompt = `You are a smart reminder assistant. Analyze the user's voice command and determine their intent.
+    const systemPrompt = `You are a smart reminder assistant. Analyze the user's voice command/message and determine their intent.
 
 Current date: ${todayStr}
 Current time: ${timeStr}
 
-User said: "${text}"
-
 The text may be in English, Tamil, or Thanglish.
 
-Determine the intent and return ONLY a JSON object.
+Determine the intent and return ONLY a JSON object. If the user is just chatting or asking a follow-up question that isn't a direct command, use the "conversational" intent and provide your text response.
 
 If user wants to ADD a reminder:
 {"intent":"add_reminder","message":"full reminder text","location":null_or_location,"date":"YYYY-MM-DD","time":"HH:MM"}
 
 If user wants to QUERY reminders:
 {"intent":"query_reminders","query_type":"all|upcoming|completed|by_location|by_date|by_time","location":null_or_location,"date":null_or_"YYYY-MM-DD","time":null_or_"HH:MM","summary_request":"what the user asked in simple english"}
+
+If user wants to UPDATE a reminder:
+{"intent":"update_reminder","reminder_id":"exact ID if known from chat history, else null","reminder_hint":"keyword identifying the reminder if ID is null","updates":{"message":"new message or null","date":"YYYY-MM-DD or null","time":"HH:MM or null","location":"new location or null","type":"ONCE or DAILY or null"}}
+Only include non-null fields in updates.
+
+If user wants to DELETE a reminder:
+{"intent":"delete_reminder","reminder_id":"exact ID if known from chat history, else null","reminder_hint":"keyword identifying the reminder if ID is null"}
+
+If the user is just talking, asking general questions, or following up on previous reminders without a specific CRUD action:
+{"intent":"conversational","response":"your helpful conversational reply based on the chat history (in simple English)"}
+
+Intent detection rules:
+- "change", "update", "modify", "reschedule", "move to", "push to" → update_reminder
+- "delete", "remove", "cancel", "get rid of" → delete_reminder
+- "add", "remind me", "create", "set a reminder" → add_reminder
+- "show", "list", "what", "how many", "any" → query_reminders
+- Greetings, thanks, or general queries → conversational
 
 Query type rules:
 - "show all reminders" or "show my reminders" → query_type: "all"
@@ -56,9 +71,31 @@ Tamil/Thanglish hints:
 - "maalai" = evening
 - "iravu" = night
 - "show pannunga" or "kaatu" = show/query
+- "maathu" or "change pannu" = update
+- "delete pannu" or "neekkunga" = delete
 
 Return ONLY JSON. No explanation. No markdown. No backticks.
 CRITICAL: Output ONLY the JSON object. Start with { end with }. Zero other text.`;
+
+    // Map chat history to Groq format with detailed Reminder context (Memory Chain Link)
+    const historyMessages = chatHistory.slice(-20).map(msg => {
+      let content = msg.content;
+      // If AI showed reminders, inject their Exact IDs and data into the memory!
+      if (msg.type === 'assistant' && msg.reminders && msg.reminders.length > 0) {
+        const reminderContext = msg.reminders.map((r, i) => `${i+1}. [ID: ${r.id}] "${r.title}" at ${r.dateTime || 'No Time'} (Location: ${r.location || 'None'})`).join('\n');
+        content += `\n\n[SYSTEM CONTEXT - You showed the user these reminders previously. Use exact ID if user refers to them:]\n${reminderContext}`;
+      }
+      return {
+        role: msg.type === 'user' ? 'user' : 'assistant',
+        content,
+      };
+    });
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...historyMessages,
+      { role: 'user', content: `[Latest message] ${text}\n\nREMEMBER: Return ONLY a valid JSON object. No other text.` }
+    ];
 
     const response = await fetch(Config.GROQ_API_URL, {
       method: 'POST',
@@ -68,9 +105,9 @@ CRITICAL: Output ONLY the JSON object. Start with { end with }. Zero other text.
       },
       body: JSON.stringify({
         model: Config.GROQ_MODEL_JSON,
-        messages: [{ role: 'user', content: prompt }],
+        messages: messages,
         temperature: 0.1,
-        max_tokens: 300,
+        max_tokens: 350,
       }),
     });
 
@@ -96,47 +133,55 @@ CRITICAL: Output ONLY the JSON object. Start with { end with }. Zero other text.
     if (!userId) return [];
 
     try {
-      let filters = {};
+      const { getAllReminders } = require('./ApiService');
+      const apiData = await getAllReminders(userId);
+      
+      // Combine all active to fix the 4 daily reminders issue
+      const allActive = [
+         ...(apiData.reminders.today || []),
+         ...(apiData.reminders.upcoming || []),
+         ...(apiData.reminders.past || []),
+         ...(apiData.reminders.closed || []),
+      ];
+
+      let filtered = allActive;
 
       switch (intent.query_type) {
         case 'all':
-          filters = {};
-          break;
+          break; // leave allActive
 
         case 'upcoming':
-          filters = { filter: 'upcoming' };
+          filtered = allActive.filter(r => !r.closed && !r.deleted);
           break;
 
         case 'completed':
-          filters = { filter: 'closed' };
+          filtered = allActive.filter(r => r.closed);
           break;
 
         case 'by_location':
           if (intent.location) {
-            filters = { location: intent.location };
+            filtered = allActive.filter(r => r.location && r.location.toLowerCase().includes(intent.location.toLowerCase()));
           }
           break;
 
         case 'by_date':
           if (intent.date) {
-            filters = { date_from: intent.date, date_to: intent.date };
+            filtered = allActive.filter(r => r.reminder_date === intent.date);
           }
           break;
 
         case 'by_time':
           if (intent.time) {
-            filters = { time: intent.time };
+            filtered = allActive.filter(r => r.reminder_time === intent.time);
           }
           break;
 
         default:
-          filters = { filter: 'upcoming' };
+          filtered = allActive.filter(r => !r.closed && !r.deleted);
       }
 
-      const data = await filterReminders(userId, filters);
-
       // Map API fields to shape generateSummary expects
-      return (data.reminders || []).map(r => ({
+      return filtered.map(r => ({
         id: r.id,
         title: r.message || '',
         location: r.location || '',
@@ -182,9 +227,9 @@ User asked: "${summaryRequest}"
 Found ${results.length} reminder(s):
 ${JSON.stringify(remindersList, null, 2)}
 
-Give a brief, natural, conversational summary in 2-3 sentences.
-Mention key details like count, locations, times.
-Be concise and helpful.
+Give a brief 1-sentence introduction to the list (e.g. "Here are your pending tasks.").
+DO NOT list the individual reminder details in text form, as they will be displayed as visual UI cards below your message.
+Be extremely concise.
 If Tamil/Thanglish was used in the request, respond in simple English.`;
 
     const response = await fetch(Config.GROQ_API_URL, {

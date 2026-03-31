@@ -61,7 +61,7 @@ const VoiceService = {
                if (onSilenceDetected) {
                   onSilenceDetected();
                }
-            }, 1500);
+            }, 2000);
          }
       });
 

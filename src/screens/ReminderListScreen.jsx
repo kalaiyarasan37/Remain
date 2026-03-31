@@ -74,13 +74,15 @@ const ReminderListScreen = ({ navigation, route }) => {
 
       try {
          const data = await getAllReminders(userId);
-         const all = [
+         const allRaw = [
             ...(data.reminders.today || []),
             ...(data.reminders.upcoming || []),
             ...(data.reminders.past || []),
             ...(data.reminders.closed || []),
             ...(data.reminders.deleted || []),
-         ].map(r => mapReminder(r));
+         ];
+         const uniqueReminders = Array.from(new Map(allRaw.map(item => [item.id, item])).values());
+         const all = uniqueReminders.map(r => mapReminder(r));
          
          // 1. Active: Not completed, Not deleted. Sorted soonest first (ascending)
          const active = all
@@ -198,12 +200,29 @@ const ReminderListScreen = ({ navigation, route }) => {
       if (!selectedReminder) return;
       try {
          const isDaily = selectedReminder.type === 'DAILY';
-         const nextDateStr = new Date(new Date().getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+         const now = new Date();
+         const todayStr = now.toISOString().split('T')[0];
+         const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+         const timeStr = selectedReminder.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
+
+         if (isDaily) {
+            const newRem = await createReminder({
+               user_id: (await Storage.get('user'))?.id,
+               message: selectedReminder.title,
+               date: todayStr,
+               time: timeStr,
+               location: selectedReminder.location,
+               type: 'ONCE',
+            });
+            if (newRem?.reminder?.id) {
+               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+            }
+         }
 
          await updateReminder(selectedReminder.id, {
             message: selectedReminder.title,
             date: isDaily ? nextDateStr : selectedReminder.dateTime.split('T')[0],
-            time: selectedReminder.dateTime.split('T')[1]?.substring(0, 8),
+            time: timeStr,
             location: selectedReminder.location,
             type: selectedReminder.type || 'ONCE',
             closed: !isDaily,
@@ -261,12 +280,29 @@ const ReminderListScreen = ({ navigation, route }) => {
       if (!reminder) return;
       try {
          const isDaily = reminder.type === 'DAILY';
-         const nextDateStr = new Date(new Date().getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+         const now = new Date();
+         const todayStr = now.toISOString().split('T')[0];
+         const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+         const timeStr = reminder.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
+
+         if (isDaily) {
+            const newRem = await createReminder({
+               user_id: (await Storage.get('user'))?.id,
+               message: reminder.title,
+               date: todayStr,
+               time: timeStr,
+               location: reminder.location,
+               type: 'ONCE',
+            });
+            if (newRem?.reminder?.id) {
+               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+            }
+         }
 
          await updateReminder(id, {
             message: reminder.title,
             date: isDaily ? nextDateStr : reminder.dateTime.split('T')[0],
-            time: reminder.dateTime.split('T')[1]?.substring(0, 8),
+            time: timeStr,
             location: reminder.location,
             type: reminder.type || 'ONCE',
             closed: !isDaily,
