@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "850557142090",
+    "project_id": "remainapp",
+    "storage_bucket": "remainapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:850557142090:android:1216deed6591f0204012b3",
+        "android_client_info": {
+          "package_name": "com.remainapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDcnqkcN_J9z7lpSyvF7BSdqxDG302H2cU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

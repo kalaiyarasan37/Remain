@@ -1,67 +1,24 @@
-import Config from '../constants/Config';
+import { askAI, askJSON } from './ApiService';
 
 const AIService = {
 
    // For human text responses (briefing, summary)
    ask: async (prompt, maxTokens = 500, fast = false) => {
-      const model = fast ? Config.GROQ_MODEL_FAST : Config.GROQ_MODEL;
       try {
-         const response = await fetch(Config.GROQ_API_URL, {
-            method: 'POST',
-            headers: {
-               'Content-Type': 'application/json',
-               Authorization: `Bearer ${Config.GROQ_API_KEY}`,
-            },
-            body: JSON.stringify({
-               model: model,
-               messages: [{ role: 'user', content: prompt }],
-               temperature: 0.3,
-               max_tokens: maxTokens,
-            }),
-         });
-         const data = await response.json();
-         if (data.error) { throw new Error(data.error.message); }
-         return data.choices[0].message.content.trim();
+         const data = await askAI(prompt);
+         return data.response;
       } catch (e) {
-         console.log('Falling back to Llama:', e.message);
-         const response = await fetch(Config.GROQ_API_URL, {
-            method: 'POST',
-            headers: {
-               'Content-Type': 'application/json',
-               Authorization: `Bearer ${Config.GROQ_API_KEY}`,
-            },
-            body: JSON.stringify({
-               model: Config.GROQ_MODEL_JSON,
-               messages: [{ role: 'user', content: prompt }],
-               temperature: 0.1,
-               max_tokens: maxTokens,
-            }),
-         });
-         const data = await response.json();
-         if (data.error) { throw new Error(data.error.message); }
-         return data.choices[0].message.content.trim();
+         console.error('AIService ask error:', e.message);
+         throw e;
       }
    },
 
    // For JSON responses (suggestions, priority, duplicate)
    askJSON: async (prompt, maxTokens = 500) => {
       try {
-         const response = await fetch(Config.GROQ_API_URL, {
-            method: 'POST',
-            headers: {
-               'Content-Type': 'application/json',
-               Authorization: `Bearer ${Config.GROQ_API_KEY}`,
-            },
-            body: JSON.stringify({
-               model: Config.GROQ_MODEL_JSON,
-               messages: [{ role: 'user', content: prompt }],
-               temperature: 0.1,
-               max_tokens: maxTokens,
-            }),
-         });
-         const data = await response.json();
-         if (data.error) { throw new Error(data.error.message); }
-         return data.choices[0].message.content.trim();
+         const data = await askJSON(prompt);
+         // Return stringified JSON so existing parsing logic works seamlessly
+         return JSON.stringify(data);
       } catch (e) {
          throw e;
       }

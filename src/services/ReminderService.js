@@ -150,16 +150,7 @@ const ReminderService = {
   // ── COMPLETE ─────────────────────────────────
   complete: async (id) => {
     try {
-      const data = await getReminder(id);
-      const reminder = data.reminder || data;
-      await updateReminder(id, {
-        message: reminder.message,
-        date: reminder.reminder_date,
-        time: reminder.reminder_time,
-        location: reminder.location || undefined,
-        type: reminder.reminder_type || 'ONCE',
-        closed: true,
-      });
+      await updateReminder(id, { closed: true });
       await NotificationService.cancelForReminder(id);
     } catch (e) {
       console.error('ReminderService.complete error:', e.message);

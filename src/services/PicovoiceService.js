@@ -1,125 +1,105 @@
-/* 
-import {
-   PermissionsAndroid,
-   Platform,
-   AppState,
-} from 'react-native';
-import { PorcupineManager } from '@picovoice/porcupine-react-native';
-import Config from '../constants/Config';
-import AppForegroundService from './AppForegroundService';
+import { Platform, PermissionsAndroid } from 'react-native';
+import { PorcupineManager, BuiltInKeyword } from '@picovoice/porcupine-react-native';
+import { navigate } from '../navigation/NavigationService';
+
+// To use a custom "Hey Reminder" wake word instead of the default "Porcupine", 
+// you must upload your keyword at console.picovoice.ai, download the .ppn file, 
+// and use `fromKeywordPaths` instead of `fromBuiltInKeywords`.
+const PICOVOICE_ACCESS_KEY = "YOUR_PICOVOICE_ACCESS_KEY_HERE";
 
 let porcupineManager = null;
-let onWakeWordCallback = null;
+let isListening = false;
 
 const PicovoiceService = {
+  start: async () => {
+    if (isListening || PICOVOICE_ACCESS_KEY === "YOUR_PICOVOICE_ACCESS_KEY_HERE") {
+       console.log("Picovoice: Skipping start (already listening or no valid key provided)");
+       return;
+    }
 
-   init: async onWakeWord => {
+    try {
+      const hasPermission = await PicovoiceService.requestPermission();
+      if (!hasPermission) return;
+
+      // Using built-in PORCUPINE keyword as placeholder for 'Hey Reminder'
+      porcupineManager = await PorcupineManager.fromBuiltInKeywords(
+        PICOVOICE_ACCESS_KEY,
+        [BuiltInKeyword.PORCUPINE], // "Porcupine"
+        (keywordIndex) => {
+          console.log("Wake word detected! Index:", keywordIndex);
+          // Pause wake word detection while interacting
+          PicovoiceService.pauseForVoiceInput();
+          
+          // Trigger Voice Assistant and auto listen
+          navigate('VoiceAssistant', { autoListen: true });
+        }
+      );
+
+      await porcupineManager.start();
+      isListening = true;
+      console.log('Picovoice wake word listener started. Say "Porcupine" to wake.');
+    } catch (e) {
+      console.warn("Picovoice initialization failed:", e.message);
+    }
+  },
+
+  pauseForVoiceInput: async () => {
+    if (porcupineManager && isListening) {
       try {
-         console.log('Porcupine init starting...');
-         onWakeWordCallback = onWakeWord;
-
-         if (!PorcupineManager) {
-            console.warn('PorcupineManager not available');
-            return false;
-         }
-
-         await new Promise(resolve => setTimeout(resolve, 2000));
-         const hasPermission = await PicovoiceService.requestPermission();
-
-         if (!hasPermission) {
-            console.warn('Microphone permission denied for Picovoice');
-            return false;
-         }
-
-         await PicovoiceService.stop();
-
-         porcupineManager = await PorcupineManager.fromKeywordPaths(
-            Config.PICOVOICE_ACCESS_KEY,
-            [Config.WAKE_WORD_FILE],
-            (keywordIndex) => {
-               console.log('Wake word detected! Index:', keywordIndex);
-               // Bring app to foreground first
-               AppForegroundService.bringToForeground();
-               // Longer delay to let app fully come to foreground
-               setTimeout(() => {
-                  if (onWakeWordCallback) {
-                     onWakeWordCallback();
-                  }
-               }, 1000);
-            },
-            error => {
-               console.error('Porcupine error:', error);
-            },
-         );
-
-         await porcupineManager.start();
-         console.log('PorcupineManager started - listening for Hey RemainApp');
-         return true;
+        await porcupineManager.stop();
+        isListening = false;
+        console.log('Picovoice paused for voice input');
       } catch (e) {
-         console.error('Porcupine init error:', e);
-         return false;
+        console.error('Picovoice pause error:', e.message);
       }
-   },
+    }
+  },
 
-   pauseForVoiceInput: async () => {
+  resumeAfterVoiceInput: async () => {
+    if (porcupineManager && !isListening) {
       try {
-         if (porcupineManager) {
-            await porcupineManager.stop();
-            console.log('Porcupine paused for voice input');
-         }
+        await porcupineManager.start();
+        isListening = true;
+        console.log('Picovoice resumed after voice input');
       } catch (e) {
-         console.error('Porcupine pause error:', e);
+        console.error('Picovoice resume error:', e.message);
       }
-   },
+    }
+  },
 
-   resumeAfterVoiceInput: async () => {
+  stop: async () => {
+    if (porcupineManager) {
       try {
-         if (porcupineManager) {
-            await porcupineManager.start();
-            console.log('Porcupine resumed after voice input');
-         }
+        await porcupineManager.stop();
+        await porcupineManager.delete();
+        porcupineManager = null;
+        isListening = false;
+        console.log('Picovoice stopped entirely');
       } catch (e) {
-         console.error('Porcupine resume error:', e);
+        console.error('Picovoice stop error:', e.message);
       }
-   },
+    }
+  },
 
-   stop: async () => {
+  requestPermission: async () => {
+    if (Platform.OS === 'android') {
       try {
-         if (porcupineManager) {
-            await porcupineManager.stop();
-            await porcupineManager.delete();
-            porcupineManager = null;
-            console.log('PorcupineManager stopped');
-         }
-      } catch (e) {
-         console.error('Porcupine stop error:', e);
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Wake Word Permission',
+            message: 'App needs microphone to listen for the wake word.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Deny',
+          },
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      } catch (err) {
+        return false;
       }
-   },
-
-   requestPermission: async () => {
-      if (Platform.OS === 'android') {
-         const granted = await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-            {
-               title: 'Wake Word Permission',
-               message: 'RemainApp needs microphone to listen for "Hey RemainApp"',
-               buttonPositive: 'Allow',
-               buttonNegative: 'Deny',
-            },
-         );
-         return granted === PermissionsAndroid.RESULTS.GRANTED;
-      }
-      return true;
-   },
+    }
+    return true;
+  },
 };
 
-*/
-
-// Empty export to prevent import errors even if commented
-const PicovoiceService = {
-    init: () => {},
-    stop: () => {},
-    pauseForVoiceInput: () => {},
-    resumeAfterVoiceInput: () => {},
-};
 export default PicovoiceService;

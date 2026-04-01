@@ -24,6 +24,7 @@ import NotificationService from '../services/NotificationService';
 const audioRecorderPlayer = new AudioRecorderPlayer();
 import LocationPickerModal from '../components/LocationPickerModal';
 import VoiceService from '../services/VoiceService';
+import Tts from 'react-native-tts';
 
 const AddReminderScreen = ({ navigation, route }) => {
    const isVoice = route.params?.isVoice || false;
@@ -45,6 +46,9 @@ const AddReminderScreen = ({ navigation, route }) => {
             const [year, month, day] = prefillData.date.split('-').map(Number);
             const [hour, minute] = prefillData.time.split(':').map(Number);
             setSelectedDate(new Date(year, month - 1, day, hour, minute));
+         }
+         if (prefillData.type) {
+            setReminderType(prefillData.type);
          }
       }
    }, []);
@@ -292,6 +296,7 @@ const AddReminderScreen = ({ navigation, route }) => {
          const parsed = await VoiceService.parseWithAI(transcribedText);
          setIsParsing(false);
          setStatusText('');
+         if (parsed.type) setReminderType(parsed.type);
 
          // Fill message — always fill with full transcribed text
          if (parsed.message) {
@@ -301,6 +306,12 @@ const AddReminderScreen = ({ navigation, route }) => {
          // Fill location only if present
          if (parsed.location) {
             setLocation(parsed.location);
+         }
+
+         // Handle Clarification
+         if (parsed.needs_clarification && parsed.clarification_message) {
+            Tts.speak(parsed.clarification_message);
+            Alert.alert('AI Assistant', parsed.clarification_message);
          }
 
 
@@ -377,6 +388,10 @@ const AddReminderScreen = ({ navigation, route }) => {
          const [hour, minute] = timeStr.split(':').map(Number);
          const newDate = new Date(year, month - 1, day, hour, minute);
          setSelectedDate(newDate);
+
+         if (parsed.type) {
+            setReminderType(parsed.type);
+         }
 
          if (!isEditMode) {
             const shouldSuggest = await AIService.checkRepeatSuggest(parsed.message || message.trim(), pastReminders);

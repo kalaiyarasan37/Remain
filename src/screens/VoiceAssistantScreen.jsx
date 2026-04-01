@@ -14,9 +14,13 @@ import {
    Keyboard,
 } from 'react-native';
 import Colors from '../constants/Colors';
+import RNFS from 'react-native-fs';
+import Tts from 'react-native-tts';
+import NotificationService from '../services/NotificationService';
 import VoiceService from '../services/VoiceService';
 import IntentService from '../services/IntentService';
 import DaVoiceService from '../services/DaVoiceService';
+import PicovoiceService from '../services/PicovoiceService';
 import Storage from '../utils/Storage';
 import {
    createReminder,
@@ -24,6 +28,7 @@ import {
    deleteReminder,
    filterReminders,
    getReminder,
+   findSimilar,
 } from '../services/ApiService';
 
 const CHAT_STORAGE_KEY = 'voice_assistant_chat_history';
@@ -34,28 +39,60 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
    const [inputText, setInputText] = useState('');
    const [isRecording, setIsRecording] = useState(false);
    const [isProcessing, setIsProcessing] = useState(false);
-   const [pendingAction, setPendingAction] = useState(null); // For confirmation flow
+   const [isSpeaking, setIsSpeaking] = useState(false);
+   const [pendingAction, setPendingAction] = useState(null); // For CRUD confirmation flow
+
+   // ── Clarification / Validation state ──────────────────
+   const [awaitingClarification, setAwaitingClarification] = useState(null);
+   // awaitingClarification = { type, parsedData, clarificationMessage, missingField }
+   const clarificationAttemptsRef = useRef(0);
+   const MAX_CLARIFICATION_RETRIES = 2;
+   // Tracks the last query so follow-ups like "show those" work correctly
+   const lastQueryContextRef = useRef({ query_type: 'today', date: null, location: null });
 
    const scrollViewRef = useRef(null);
    const pulseAnim = useRef(new Animated.Value(1)).current;
    const pulseLoop = useRef(null);
    const recordingRef = useRef(false);
+   const autoListenRef = useRef(false);
+   const handleMicPressRef = useRef(null);
 
    // ── Load chat history on mount ──────────────────────
    useEffect(() => {
       loadChatHistory();
       DaVoiceService.pause();
+      PicovoiceService.pauseForVoiceInput();
       
+      Tts.setDefaultRate(0.5);
+      Tts.setDefaultPitch(1.0);
+      
+      const ttsStart = Tts.addListener('tts-start', () => setIsSpeaking(true));
+      const ttsFinish = Tts.addListener('tts-finish', () => {
+         setIsSpeaking(false);
+         if (autoListenRef.current) {
+            autoListenRef.current = false;
+            setTimeout(() => {
+               if (handleMicPressRef.current) handleMicPressRef.current();
+            }, 600); // Wait 600ms to avoid audio focus overlap
+         }
+      });
+      const ttsCancel = Tts.addListener('tts-cancel', () => setIsSpeaking(false));
+
       // Auto listen directly if requested by navigation params
       if (route.params?.autoListen) {
          setTimeout(() => {
-            handleMicPress();
-         }, 800); // short delay so UI renders completely
+            if (handleMicPressRef.current) handleMicPressRef.current();
+         }, 800); 
       }
 
       return () => {
          DaVoiceService.resume();
+         PicovoiceService.resumeAfterVoiceInput();
          cleanupRecording();
+         ttsStart.remove();
+         ttsFinish.remove();
+         ttsCancel.remove();
+         Tts.stop();
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [route.params?.autoListen]);
@@ -132,6 +169,17 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
          saveChatHistory(updated);
          return updated;
       });
+
+      // Simple TTS for AI responses
+      if (type === 'ai' && !extras.silent) {
+         const speakText = content.replace(/[#*`]/g, ''); // strip markdown
+         setIsSpeaking(true);
+         if (extras.autoListen) {
+            autoListenRef.current = true;
+         }
+         Tts.speak(speakText);
+      }
+
       return msg;
    }, [saveChatHistory]);
 
@@ -146,8 +194,15 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
       await processInput(text);
    };
 
+   useEffect(() => {
+      handleMicPressRef.current = handleMicPress;
+   }, [isRecording, isProcessing]);
+
    // ── Handle voice recording ─────────────────────────
    const handleMicPress = async () => {
+      // Ignore if user repeatedly taps while processing
+      if (isProcessing) return;
+
       if (isRecording) {
          // Stop recording
          await processVoice();
@@ -200,20 +255,46 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
          try { filePath = await VoiceService.stopRecording(); } catch (e) { filePath = null; }
          if (!filePath) throw new Error('Recording failed');
 
-         // Transcribe
+         // Step 1: Transcribe audio via Whisper (whisper-large-v3-turbo, temp=0, auto lang)
          addMessage('system', '⏳ Transcribing...');
-         const text = await VoiceService.transcribeAudio(filePath);
-         // Remove transcribing message
+         const transcribedText = await VoiceService.transcribeAudio(filePath);
          setMessages(prev => prev.filter(m => m.content !== '⏳ Transcribing...'));
 
-         addMessage('user', text);
-         await processInput(text);
+         if (!transcribedText || transcribedText.trim().length < 2) {
+            addMessage('ai', "🤔 I didn't catch anything. Please speak clearly and try again.");
+            setIsProcessing(false);
+            return;
+         }
+
+         // Step 2: Show what was heard, then process exactly like typed text
+         // (intent detection handles routing — query, add, update, delete, chat)
+         addMessage('user', transcribedText);
+         await processInput(transcribedText);
       } catch (e) {
-         setMessages(prev => prev.filter(m =>
-            m.content !== '⏳ Transcribing...'
-         ));
+         setMessages(prev => prev.filter(m => m.content !== '⏳ Transcribing...'));
+         console.error('processVoice error:', e);
          addMessage('ai', '😕 Could not process your voice. Please try again.');
          setIsProcessing(false);
+      }
+   };
+
+   // ── Clarification retry handler ────────────────────────
+   const handleClarificationRetry = async (action) => {
+      if (action === 'try_again') {
+         // Restart recording
+         setAwaitingClarification(null);
+         addMessage('system', '🔄 Starting over — please speak again...');
+         setTimeout(() => {
+            setMessages(prev => prev.filter(m =>
+               m.content !== '🔄 Starting over — please speak again...'
+            ));
+            handleMicPress();
+         }, 800);
+      } else if (action === 'type_it') {
+         // Dismiss clarification, let user type
+         setAwaitingClarification(null);
+         clarificationAttemptsRef.current = 0;
+         addMessage('ai', '✏️ Sure! Please type your reminder below.');
       }
    };
 
@@ -239,11 +320,44 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
             case 'conversational':
                addMessage('ai', intent.response, { intent: 'conversational' });
                break;
+
+            // ── New precise intents ────────────────────────────────────────────
+            case 'get_count': {
+               // Fetch real count from DB, pass countOnly=true so LLM just formats the number
+               const ctx = {
+                  query_type: intent.query_type || 'today',
+                  date: intent.date,
+                  location: intent.location,
+               };
+               lastQueryContextRef.current = ctx; // remember for follow-ups
+               await handleQueryReminders(ctx, text, true /* countOnly */);
+               break;
+            }
+            case 'show_list': {
+               // If follow-up ("those", "them"), reuse last query context
+               const ctx = intent.is_followup
+                  ? lastQueryContextRef.current
+                  : {
+                       query_type: intent.query_type || 'today',
+                       date: intent.date,
+                       location: intent.location,
+                    };
+               lastQueryContextRef.current = ctx;
+               await handleQueryReminders(ctx, text, false /* showList */);
+               break;
+            }
+
+            // ── Legacy / fallback intents ──────────────────────────────────
             case 'add_reminder':
                await handleAddReminder(intent);
                break;
             case 'query_reminders':
-               await handleQueryReminders(intent, text);
+               lastQueryContextRef.current = {
+                  query_type: intent.query_type || 'today',
+                  date: intent.date,
+                  location: intent.location,
+               };
+               await handleQueryReminders(intent, text, false);
                break;
             case 'update_reminder':
                await handleUpdateReminder(intent);
@@ -252,8 +366,7 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
                await handleDeleteReminder(intent);
                break;
             default:
-               // General query - treat as query_reminders
-               await handleQueryReminders({ query_type: 'upcoming' }, text);
+               await handleQueryReminders({ query_type: 'upcoming' }, text, false);
                break;
          }
       } catch (e) {
@@ -268,34 +381,119 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
    // ── CRUD Handlers ──────────────────────────────────
 
    const handleAddReminder = async (intent) => {
-      addMessage('ai', `📝 Creating reminder: "${intent.message}"\n\nOpening the reminder form...`, {
+      // ── Step 1: Smart parse + confidence check ────────────
+      // Only run /parse when intent is confirmed as add_reminder.
+      // This gives us richer data (date/time/location/language) and
+      // validates confidence BEFORE opening the form.
+      let enrichedIntent = intent;
+
+      try {
+         const { parseWithAI: parseApi } = require('../services/ApiService');
+         addMessage('system', '🧠 Checking details...');
+         const parsed = await parseApi(intent.message || '');
+         setMessages(prev => prev.filter(m => m.content !== '🧠 Checking details...'));
+
+         if (parsed && parsed.needs_clarification) {
+            clarificationAttemptsRef.current += 1;
+
+            if (clarificationAttemptsRef.current > MAX_CLARIFICATION_RETRIES) {
+               // Open form with whatever we have
+               clarificationAttemptsRef.current = 0;
+               setAwaitingClarification(null);
+            } else {
+               const clarMsg = parsed.clarification_message || 'Can you please repeat or confirm?';
+               setAwaitingClarification({
+                  type: 'add_reminder_clarification',
+                  parsedData: parsed,
+                  originalIntent: intent,
+               });
+               addMessage('ai', `🎙️ ${clarMsg}`, { 
+                  intent: 'needs_clarification',
+                  autoListen: true 
+               });
+               setIsProcessing(false);
+               return; // Wait for user to retry or type
+            }
+         } else if (parsed && !parsed.needs_clarification) {
+            // Good confident parse — merge richer fields into intent
+            clarificationAttemptsRef.current = 0;
+            setAwaitingClarification(null);
+            enrichedIntent = {
+               ...intent,
+               message: parsed.task || intent.message,
+               date:    parsed.date || intent.date,
+               time:    parsed.time || intent.time,
+               location: parsed.location || intent.location,
+               type:    parsed.type || intent.type || 'ONCE',
+               language: parsed.language,
+               natural_message: parsed.natural_message,
+            };
+            // Show the AI's natural language confirmation
+            if (parsed.natural_message) {
+               addMessage('ai', `✅ ${parsed.natural_message}`, { intent: 'add_confirmation' });
+            }
+         }
+      } catch (parseErr) {
+         setMessages(prev => prev.filter(m => m.content !== '🧠 Checking details...'));
+         console.log('Parse check failed (non-fatal):', parseErr.message);
+         // Fall through with original intent
+      }
+
+      // ── Step 2: Location suggestion (existing logic) ──────
+      try {
+         const userData = await Storage.get('user');
+         const userId = userData?.id;
+
+         if (userId && !enrichedIntent.location) {
+            const similar = await findSimilar({ user_id: userId, message: enrichedIntent.message });
+            if (similar.found && similar.reminder.location) {
+               setPendingAction({
+                  type: 'location_suggestion',
+                  intent: enrichedIntent,
+                  suggestedLocation: similar.reminder.location,
+               });
+               addMessage('ai',
+                  `📍 I found a similar previous reminder for "${enrichedIntent.message}" at **${similar.reminder.location}**.\n\nUse this location or a new one?`,
+                  { intent: 'location_suggestion' }
+               );
+               setIsProcessing(false);
+               return;
+            }
+         }
+      } catch (e) {
+         console.log('Similar location fetch failed:', e.message);
+      }
+
+      // ── Step 3: Open the form ─────────────────────────────
+      addMessage('ai', `📝 Creating reminder: "${enrichedIntent.message}"\n\nOpening the reminder form...`, {
          intent: 'add_reminder',
       });
 
       setTimeout(() => {
          navigation.navigate('AddReminder', {
             isVoice: true,
-            prefillData: intent,
+            prefillData: enrichedIntent,
          });
       }, 800);
    };
 
-   const handleQueryReminders = async (intent, originalText) => {
+   const handleQueryReminders = async (intent, originalText, countOnly = false) => {
       try {
          addMessage('system', '🔍 Searching reminders...');
          const queryResults = await IntentService.queryReminders(intent);
-
-         // Remove searching message
          setMessages(prev => prev.filter(m => m.content !== '🔍 Searching reminders...'));
 
+         // generateSummary uses the REAL count from DB — LLM only formats the response
          const aiSummary = await IntentService.generateSummary(
             queryResults,
             intent.summary_request || originalText,
+            countOnly, // true = just show the count, false = show full list with cards
          );
 
          addMessage('ai', aiSummary, {
-            reminders: queryResults.slice(0, 10),
-            intent: 'query_reminders',
+            // Only attach reminder cards when showing list, not when just counting
+            reminders: countOnly ? [] : queryResults.slice(0, 10),
+            intent: countOnly ? 'get_count' : 'query_reminders',
          });
       } catch (e) {
          setMessages(prev => prev.filter(m => m.content !== '🔍 Searching reminders...'));
@@ -461,9 +659,28 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
             await executeUpdate(pendingAction.reminderId, pendingAction.reminderTitle, pendingAction.updates);
          } else if (pendingAction.type === 'delete') {
             await executeDelete(pendingAction.reminderId, pendingAction.reminderTitle);
+         } else if (pendingAction.type === 'location_suggestion') {
+            const updatedIntent = { ...pendingAction.intent, location: pendingAction.suggestedLocation };
+            addMessage('ai', `✅ Using location: **${pendingAction.suggestedLocation}**\n\nOpening form...`);
+            setTimeout(() => {
+               navigation.navigate('AddReminder', {
+                  isVoice: true,
+                  prefillData: updatedIntent,
+               });
+            }, 800);
          }
       } else if (isNo) {
-         addMessage('ai', '👍 Operation cancelled.');
+         if (pendingAction && pendingAction.type === 'location_suggestion') {
+            addMessage('ai', '👍 Skipping suggested location.\n\nOpening form...');
+            setTimeout(() => {
+               navigation.navigate('AddReminder', {
+                  isVoice: true,
+                  prefillData: pendingAction.intent,
+               });
+            }, 800);
+         } else {
+            addMessage('ai', '👍 Operation cancelled.');
+         }
       } else {
          addMessage('ai', '🤔 Please reply **"yes"** to confirm or **"no"** to cancel.');
          setIsProcessing(false);
@@ -480,6 +697,12 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
          addMessage('ai', `✅ Updated: "${title}"\n\nChanges applied successfully!`, {
             intent: 'update_success',
          });
+         
+         // Reschedule local alarms
+         const userData = await Storage.get('user');
+         if (userData?.id) {
+            NotificationService.scheduleForUserId(userData.id);
+         }
       } catch (e) {
          console.error('Execute update error:', e);
          addMessage('ai', `❌ Failed to update "${title}". Please try again.`);
@@ -492,6 +715,12 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
          addMessage('ai', `✅ Deleted: "${title}"\n\nReminder has been moved to trash.`, {
             intent: 'delete_success',
          });
+         
+         // Reschedule local alarms
+         const userData = await Storage.get('user');
+         if (userData?.id) {
+            NotificationService.scheduleForUserId(userData.id);
+         }
       } catch (e) {
          console.error('Execute delete error:', e);
          addMessage('ai', `❌ Failed to delete "${title}". Please try again.`);
@@ -558,9 +787,19 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
                <Text style={styles.headerTitle}>🤖 AI Assistant</Text>
                <Text style={styles.headerSubtitle}>Voice & Text Commands</Text>
             </View>
-            <TouchableOpacity onPress={handleClearChat} style={styles.clearBtn}>
-               <Text style={styles.clearBtnText}>🗑️</Text>
-            </TouchableOpacity>
+            <View style={styles.headerRight}>
+               {isSpeaking && (
+                  <TouchableOpacity 
+                     onPress={() => { Tts.stop(); setIsSpeaking(false); }} 
+                     style={styles.stopBtn}
+                  >
+                     <Text style={styles.stopIconText}>🔇</Text>
+                  </TouchableOpacity>
+               )}
+               <TouchableOpacity onPress={handleClearChat} style={styles.clearBtn}>
+                  <Text style={styles.clearBtnText}>🗑️</Text>
+               </TouchableOpacity>
+            </View>
          </View>
 
          {/* ── Chat Messages ─────────────────────────── */}
@@ -613,7 +852,10 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
                                  {msg.reminders.map((r) => (
                                     <TouchableOpacity
                                        key={r.id}
-                                       style={styles.inlineReminderCard}
+                                       style={[
+                                          styles.inlineReminderCard,
+                                          r.isCompleted && styles.completedCard
+                                       ]}
                                        onPress={() => {
                                           if (r.id) {
                                               navigation.navigate('AddReminder', {
@@ -634,22 +876,22 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
                                           <Text style={styles.inlineReminderIcon}>
                                              {r.isCompleted ? '✅' : '📌'}
                                           </Text>
-                                          <Text style={styles.inlineReminderTitle} numberOfLines={2}>
+                                          <Text style={[styles.inlineReminderTitle, r.isCompleted && styles.completedText]} numberOfLines={2}>
                                              {r.title}
                                           </Text>
                                        </View>
                                        {r.location ? (
-                                          <Text style={styles.inlineReminderLocation}>
+                                          <Text style={[styles.inlineReminderLocation, r.isCompleted && styles.completedTextLight]}>
                                              📍 {r.location}
                                           </Text>
                                        ) : null}
                                        {r.dateTime ? (
-                                          <Text style={styles.inlineReminderTime}>
+                                          <Text style={[styles.inlineReminderTime, r.isCompleted && styles.completedTextLight]}>
                                              🕐 {formatReminderDateTime(r.dateTime)}
                                           </Text>
                                        ) : null}
                                        {r.type === 'DAILY' && (
-                                          <View style={styles.dailyTag}>
+                                          <View style={[styles.dailyTag, r.isCompleted && styles.completedTag]}>
                                              <Text style={styles.dailyTagText}>DAILY</Text>
                                           </View>
                                        )}
@@ -682,8 +924,28 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
 
             {/* ── Bottom Input Bar ────────────────────── */}
             <View style={styles.inputBar}>
-               {/* Pending confirmation indicator */}
-               {pendingAction && (
+               {/* Clarification quick-reply (voice validation retry) */}
+               {awaitingClarification && (
+                  <View style={styles.clarificationRow}>
+                     <Text style={styles.clarificationHint}>What would you like to do?</Text>
+                     <View style={styles.quickReplyRow}>
+                        <TouchableOpacity
+                           style={styles.quickReplyBtnRetry}
+                           onPress={() => handleClarificationRetry('try_again')}
+                        >
+                           <Text style={styles.quickReplyText}>🔁 Try Again</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                           style={styles.quickReplyBtnType}
+                           onPress={() => handleClarificationRetry('type_it')}
+                        >
+                           <Text style={styles.quickReplyText}>✏️ Type It</Text>
+                        </TouchableOpacity>
+                     </View>
+                  </View>
+               )}
+               {/* CRUD Pending confirmation indicator */}
+               {pendingAction && !awaitingClarification && (
                   <View style={styles.quickReplyRow}>
                      <TouchableOpacity style={styles.quickReplyBtnOk} onPress={() => handleConfirmation('yes')}>
                         <Text style={styles.quickReplyText}>✅ Yes, confirm</Text>
@@ -696,7 +958,13 @@ const VoiceAssistantScreen = ({ navigation, route }) => {
                <View style={styles.inputRow}>
                   <TextInput
                      style={styles.textInput}
-                     placeholder={pendingAction ? 'Type "yes" or "no"...' : 'Type a message...'}
+                     placeholder={
+                        pendingAction
+                           ? 'Type "yes" or "no"...'
+                           : awaitingClarification
+                              ? 'Type your reminder...'
+                              : 'Type a message...'
+                     }
                      placeholderTextColor={Colors.textLight}
                      value={inputText}
                      onChangeText={setInputText}
@@ -794,6 +1062,25 @@ const styles = StyleSheet.create({
    },
    clearBtnText: {
       fontSize: 18,
+   },
+   headerRight: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      zIndex: 2,
+   },
+   stopBtn: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: 'rgba(255, 68, 68, 0.4)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: 'rgba(255, 255, 255, 0.3)',
+   },
+   stopIconText: {
+      fontSize: 20,
    },
 
    // ── Chat Area ───────────────────────────────────────
@@ -960,6 +1247,21 @@ const styles = StyleSheet.create({
       fontSize: 10,
       fontWeight: 'bold',
    },
+   completedCard: {
+      opacity: 0.6,
+      backgroundColor: '#f1f1f1',
+      borderLeftColor: Colors.textLight,
+   },
+   completedText: {
+      textDecorationLine: 'line-through',
+      color: Colors.textLight,
+   },
+   completedTextLight: {
+      color: '#999',
+   },
+   completedTag: {
+      backgroundColor: '#eee',
+   },
 
    // ── Input Bar ───────────────────────────────────────
    inputBar: {
@@ -968,12 +1270,44 @@ const styles = StyleSheet.create({
       backgroundColor: Colors.white,
       paddingBottom: Platform.OS === 'ios' ? 24 : 8,
    },
+   // ── Clarification quick-reply row ───────────────────
+   clarificationRow: {
+      backgroundColor: '#FFF8E1',
+      borderTopWidth: 1,
+      borderTopColor: '#FFE082',
+      paddingTop: 6,
+      paddingBottom: 4,
+   },
+   clarificationHint: {
+      textAlign: 'center',
+      fontSize: 11,
+      color: '#8D6E63',
+      marginBottom: 4,
+      fontStyle: 'italic',
+   },
    quickReplyRow: {
       flexDirection: 'row',
       justifyContent: 'center',
       paddingHorizontal: 16,
-      paddingTop: 8,
+      paddingTop: 4,
+      paddingBottom: 6,
       gap: 12,
+   },
+   quickReplyBtnRetry: {
+      backgroundColor: '#6C63FF',
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 100,
+      flex: 1,
+      alignItems: 'center',
+   },
+   quickReplyBtnType: {
+      backgroundColor: '#00897B',
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 100,
+      flex: 1,
+      alignItems: 'center',
    },
    quickReplyBtnOk: {
       backgroundColor: Colors.success || '#4CAF50',

@@ -35,7 +35,7 @@ const MONTHS = [
 ];
 
 const HomeScreen = ({ navigation, route }) => {
-
+   const isSyncing = React.useRef(false);
    const [upcomingReminders, setUpcomingReminders] = useState([]);
    const [allReminders, setAllReminders] = useState([]);
    const [user, setUser] = useState(null);
@@ -175,10 +175,16 @@ const HomeScreen = ({ navigation, route }) => {
    };
 
    const loadData = async () => {
+      if (isSyncing.current) return;
+      isSyncing.current = true;
+
       const userData = await Storage.get('user');
       setUser(userData);
       const userId = userData?.id;
-      if (!userId) { return; }
+      if (!userId) { 
+         isSyncing.current = false;
+         return; 
+      }
 
       try {
          // Get all reminders summary
@@ -194,79 +200,12 @@ const HomeScreen = ({ navigation, route }) => {
          // Map API fields to your existing UI fields
          const mapped = uniqueActive.map(r => mapReminder(r));
 
-         // Auto-complete reminders whose time has reached
-         const now = new Date();
-         let changed = false;
-         for (const r of mapped) {
-            if (r.isCompleted || r.isDeleted) continue;
-            const rTime = new Date(r.dateTime).getTime();
-            if (rTime < now.getTime()) {
-               changed = true;
-               // We perform the "Done" logic internally here
-               const isDaily = r.type === 'DAILY';
-               const todayStr = now.toISOString().split('T')[0];
-               const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-               const timeStr = r.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
-
-               try {
-                  if (isDaily) {
-                     // Only create a closed clone if the time hasn't already passed TODAY
-                     // (backend rejects creating ONCE reminders with a past datetime)
-                     const cloneDateTime = new Date(`${todayStr}T${timeStr}`);
-                     if (cloneDateTime.getTime() > now.getTime() - 60000) {
-                        // within 1-min grace — still create clone
-                        const newRem = await createReminder({
-                           user_id: userId, message: r.title, date: todayStr, time: timeStr,
-                           location: r.location, type: 'ONCE'
-                        });
-                        if (newRem && newRem.reminder && newRem.reminder.id) {
-                           await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
-                        }
-                     }
-                     // Always move DAILY reminder forward to tomorrow
-                     await updateReminder(r.id, {
-                        message: r.title, date: nextDateStr, time: timeStr,
-                        location: r.location, type: 'DAILY', closed: false,
-                     });
-                  } else {
-                     // Use ReminderService.complete() — it fetches the reminder fresh
-                     // from backend first, so all required fields (message, date, time, type)
-                     // are sent correctly without relying on potentially stale local values
-                     const ReminderService = require('../services/ReminderService').default;
-                     await ReminderService.complete(r.id);
-                  }
-               } catch (e) {
-                  console.warn('Auto-complete skipped for', r.id, e.message);
-               }
-            }
-         }
-
-         // ── ONE-TIME CLEANUP: Delete stray ACTIVE ONCE clones that share names with Daily tags ──
-         const dailyTitles = new Set(mapped.filter(m => m.type === 'DAILY').map(m => m.title));
-         const strayOnces = mapped.filter(m => m.type === 'ONCE' && !m.isCompleted && !m.isDeleted && dailyTitles.has(m.title));
-         for (const stray of strayOnces) {
-             try { await deleteReminder(stray.id); changed = true; } catch(e) {}
-         }
-
-         if (changed) {
-            // Reload if any auto-completions happened
-            const freshData = await getAllReminders(userId);
-            const freshActiveRaw = [
-               ...(freshData.reminders.today || []),
-               ...(freshData.reminders.upcoming || []),
-               ...(freshData.reminders.past || []),
-               ...(freshData.reminders.closed || []),
-            ];
-            const uniqueFreshActive = Array.from(new Map(freshActiveRaw.map(item => [item.id, item])).values());
-            const freshMapped = uniqueFreshActive.map(r => mapReminder(r));
-            setAllReminders(freshMapped);
-            updateLists(freshMapped);
-         } else {
-            setAllReminders(mapped);
-            updateLists(mapped);
-         }
+         setAllReminders(mapped);
+         updateLists(mapped);
       } catch (err) {
          console.error('loadData error:', err);
+      } finally {
+         isSyncing.current = false;
       }
    };
 
@@ -342,45 +281,7 @@ const HomeScreen = ({ navigation, route }) => {
 
    const handleMarkDoneDirect = async item => {
       try {
-         const isDaily = item.type === 'DAILY';
-         const now = new Date();
-         const todayStr = now.toISOString().split('T')[0];
-         const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-         const timeStr = item.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
-
-         if (isDaily) {
-            // 1. Create a completed ONCE clone for today
-            const newRem = await createReminder({
-               user_id: user.id || (await Storage.get('user'))?.id,
-               message: item.title,
-               date: todayStr,
-               time: timeStr,
-               location: item.location,
-               type: 'ONCE'
-            });
-            if (newRem?.reminder?.id) {
-               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
-            }
-
-            // 2. Move original DAILY to tomorrow
-            await updateReminder(item.id, {
-               message: item.title,
-               date: nextDateStr,
-               time: timeStr,
-               location: item.location,
-               type: 'DAILY',
-               closed: false,
-            });
-         } else {
-            await updateReminder(item.id, {
-               message: item.title,
-               date: item.dateTime.split('T')[0],
-               time: timeStr,
-               location: item.location,
-               type: 'ONCE',
-               closed: true,
-            });
-         }
+         await updateReminder(item.id, { closed: true });
          loadData();
       } catch (err) {
          Alert.alert('Error', 'Could not complete reminder');
@@ -390,42 +291,7 @@ const HomeScreen = ({ navigation, route }) => {
    const handleMarkDone = async () => {
       if (!selectedReminder) { return; }
       try {
-         const isDaily = selectedReminder.type === 'DAILY'; // Defined here
-         const now = new Date();
-         const todayStr = now.toISOString().split('T')[0];
-         const nextDateStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-         const timeStr = selectedReminder.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
-
-         if (isDaily) {
-            const newRem = await createReminder({
-               user_id: user.id,
-               message: selectedReminder.title,
-               date: todayStr,
-               time: timeStr,
-               location: selectedReminder.location,
-               type: 'ONCE'
-            });
-            if (newRem?.reminder?.id) {
-               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
-            }
-            await updateReminder(selectedReminder.id, {
-               message: selectedReminder.title,
-               date: nextDateStr,
-               time: timeStr,
-               location: selectedReminder.location,
-               type: 'DAILY',
-               closed: false,
-            });
-         } else {
-            await updateReminder(selectedReminder.id, {
-               message: selectedReminder.title,
-               date: selectedReminder.dateTime.split('T')[0],
-               time: timeStr,
-               location: selectedReminder.location,
-               type: 'ONCE',
-               closed: true,
-            });
-         }
+         await updateReminder(selectedReminder.id, { closed: true });
          setShowModal(false);
          loadData();
       } catch (err) {

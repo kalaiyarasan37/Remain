@@ -206,16 +206,24 @@ const ReminderListScreen = ({ navigation, route }) => {
          const timeStr = selectedReminder.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
 
          if (isDaily) {
-            const newRem = await createReminder({
-               user_id: (await Storage.get('user'))?.id,
-               message: selectedReminder.title,
-               date: todayStr,
-               time: timeStr,
-               location: selectedReminder.location,
-               type: 'ONCE',
-            });
-            if (newRem?.reminder?.id) {
-               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+            const alreadyCloned = reminders.find(m => 
+               m.type === 'ONCE' && 
+               m.isCompleted && 
+               m.title === selectedReminder.title && 
+               m.dateTime?.split('T')[0] === todayStr
+            );
+            if (!alreadyCloned) {
+               const newRem = await createReminder({
+                  user_id: (await Storage.get('user'))?.id,
+                  message: selectedReminder.title,
+                  date: todayStr,
+                  time: timeStr,
+                  location: selectedReminder.location,
+                  type: 'ONCE',
+               });
+               if (newRem?.reminder?.id) {
+                  await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+               }
             }
          }
 
@@ -286,16 +294,24 @@ const ReminderListScreen = ({ navigation, route }) => {
          const timeStr = reminder.dateTime.split('T')[1]?.substring(0, 8) || '00:00:00';
 
          if (isDaily) {
-            const newRem = await createReminder({
-               user_id: (await Storage.get('user'))?.id,
-               message: reminder.title,
-               date: todayStr,
-               time: timeStr,
-               location: reminder.location,
-               type: 'ONCE',
-            });
-            if (newRem?.reminder?.id) {
-               await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+            const alreadyCloned = reminders.find(m => 
+               m.type === 'ONCE' && 
+               m.isCompleted && 
+               m.title === reminder.title && 
+               m.dateTime?.split('T')[0] === todayStr
+            );
+            if (!alreadyCloned) {
+               const newRem = await createReminder({
+                  user_id: (await Storage.get('user'))?.id,
+                  message: reminder.title,
+                  date: todayStr,
+                  time: timeStr,
+                  location: reminder.location,
+                  type: 'ONCE',
+               });
+               if (newRem?.reminder?.id) {
+                  await updateReminder(newRem.reminder.id, { closed: true, type: 'ONCE' });
+               }
             }
          }
 

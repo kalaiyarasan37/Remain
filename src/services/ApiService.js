@@ -156,8 +156,42 @@ export const checkConflict = async (payload) => {
   return await post('/reminder/check-conflict', payload, true);
 };
 
+export const findSimilar = async (payload) => {
+  // POST /api/reminder/find-similar
+  // payload: { user_id, message }
+  return await post('/reminder/find-similar', payload, true);
+};
+
 export const getDigest = async (userId, type = 'weekly') => {
   return await get(`/reminder/digest/${userId}?type=${type}`);
+};
+
+// ═════════════════════════════════════════════
+// AI APIs (Replacing direct Groq calls)
+// ═════════════════════════════════════════════
+
+export const transcribeAudio = async (audioBase64) => {
+  return await post('/reminder/transcribe', { audioBase64 }, true);
+};
+
+export const parseWithAI = async (text) => {
+  return await post('/reminder/parse', { text }, true);
+};
+
+export const getIntent = async (text, chatHistory) => {
+  return await post('/reminder/intent', { text, chatHistory }, true);
+};
+
+export const askAI = async (prompt) => {
+  return await post('/reminder/ask', { prompt, asJson: false }, true);
+};
+
+export const askJSON = async (prompt) => {
+  return await post('/reminder/ask', { prompt, asJson: true }, true);
+};
+
+export const getSuggestedTime = async (userId) => {
+  return await get(`/reminder/suggested-time/${userId}`);
 };
 
 // ═════════════════════════════════════════════

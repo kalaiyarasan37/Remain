@@ -3,6 +3,7 @@ import { ToastAndroid, DeviceEventEmitter } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import notifee, { EventType } from '@notifee/react-native';
+import { navigationRef } from './NavigationService';
 
 import SplashScreen from '../screens/SplashScreen';
 import LoginScreen from '../screens/LoginScreen';
@@ -13,14 +14,17 @@ import ReminderListScreen from '../screens/ReminderListScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import VoiceAssistantScreen from '../screens/VoiceAssistantScreen';
 import AlarmScreen from '../screens/AlarmScreen';
+import PicovoiceService from '../services/PicovoiceService';
 import Storage from '../utils/Storage';
 
 const Stack = createStackNavigator();
 
 const AppNavigator = () => {
-   const navigationRef = useRef(null);
 
    useEffect(() => {
+  // Start the Picovoice Wake Word global listener
+  PicovoiceService.start().catch(console.error);
+
   // Just create the channel on app start — scheduling happens after login
   notifee.createChannel({
     id: 'reminders_channel',
@@ -60,7 +64,7 @@ const AppNavigator = () => {
       }
     } else if (type === EventType.PRESS) {
       if (reminderId) {
-        navigationRef.current?.navigate('Home', { openContextId: reminderId });
+        if (navigationRef.isReady()) navigationRef.navigate('Home', { openContextId: reminderId });
       }
     }
   });
@@ -70,7 +74,7 @@ const AppNavigator = () => {
       const reminderId = initialNotification.notification?.data?.reminderId;
       if (reminderId) {
         setTimeout(() => {
-          navigationRef.current?.navigate('Home', { openContextId: reminderId });
+          if (navigationRef.isReady()) navigationRef.navigate('Home', { openContextId: reminderId });
         }, 1200);
       }
     }
@@ -80,12 +84,13 @@ const AppNavigator = () => {
     // Only show AlarmScreen for actual reminders — NOT OTP notifications
     if (notification?.data?.otp) return;
     if (!notification?.data?.reminderId) return;
-    navigationRef.current?.navigate('Alarm', { notification });
+    if (navigationRef.isReady()) navigationRef.navigate('Alarm', { notification });
   });
 
   return () => {
     unsubscribe();
     subShowAlarm.remove();
+    PicovoiceService.stop();
   };
 }, []);
 

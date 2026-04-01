@@ -237,4 +237,33 @@ notifee.onForegroundEvent(async ({ type, detail }) => {
   }
 });
 
+/* =====================================================================
+ * FIREBASE CLOUD MESSAGING (FCM) INTEGRATION - COMMENTED UNTIL CONFLICTS RESOLVED
+ *
+ * To enable backend trigger delivery, uncomment below after installing:
+ * npm i @react-native-firebase/app @react-native-firebase/messaging
+ * =====================================================================
+ 
+import messaging from '@react-native-firebase/messaging';
+
+messaging().setBackgroundMessageHandler(async remoteMessage => {
+  console.log('Incoming FCM Message in background!', remoteMessage);
+  if (remoteMessage.data?.action === 'TRIGGER_ALARM') {
+    // Send it to Notifee to handle display + alarm + TTS
+    await notifee.displayNotification({
+      title: remoteMessage.data.title || 'Reminder',
+      body: remoteMessage.data.body || 'You have a scheduled reminder.',
+      data: remoteMessage.data,
+      android: {
+        channelId: 'reminders_channel',
+        importance: 4, // HIGH importance is required for full-screen intent
+        fullScreenAction: {
+          id: 'default',
+        },
+      },
+    });
+  }
+});
+*/
+
 AppRegistry.registerComponent(appName, () => App);
